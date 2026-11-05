@@ -6,12 +6,17 @@
 // additions), so lines are never squeezed. Hunk headers and file metadata span the
 // full width in both.
 //
+// For a live file on this machine (not a commit's old version, not a binary), the
+// header carries an Edit button: the pane turns into an editor for the file, with
+// Save writing it back only while it still matches what was read, then refreshing
+// the diff. Leaving with unsaved changes asks once.
+//
 // It never writes to the repository, follows the panel (another click updates the
 // same pane), and follows the panel's machine for a remote space.
 
-import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list } from "gpui-base";
-import { shared, exec, readTextFile, theme, settings } from "herdr";
+import { View, div, svg } from "gpui-kit";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, Editor, EditorState } from "gpui-base";
+import { shared, exec, readTextFile, writeTextFile, theme, settings } from "herdr";
 
 // The same read flags the git panel uses: no index refresh, no lock, no fsmonitor
 // cookie, so watching the repository does not see our own reads.
@@ -23,6 +28,12 @@ const GUT = 46;          // the line-number gutter in a column.
 const NARROW = 420;      // below this width (design px), one column reads better than two.
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const countLines = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
+
+// The editor's language: the extension, or the same aliases the Files panel uses.
+const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
+const language = (path) => { const ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "txt"; return LANG[ext] ?? ext; };
+const MAX_EDIT = 1048576; // readTextFile's cap: a longer file cannot round-trip a save
+const icon = (name) => svg(`mods/git-diff/${name}.svg`).flex_none();
 
 // Real red / green row tints: saturated bases at a readable alpha. The theme's ANSI
 // red and green are pastel (built for text on a terminal), so at a low alpha they
@@ -108,13 +119,21 @@ async function loadRows(target) {
 }
 
 export default class GitDiff extends View {
-  init() {
+  init(_props, cx) {
     this.seq = null;
     this.target = null;
     this.rows = [];   // paired rows, for the two-column view
     this.uni = [];    // the same lines in unified order, for the one-column view
     this.paneW = 0;   // the pane's width in design px (zoom-independent)
     this.loading = false; this.error = null;
+    this.loadToken = 0;                 // guards a stale fetch after a save reloads it
+    this.code = null;                   // the EditorState while editing
+    this.editFile = null;               // {root, path} the editor holds
+    this.saved = null;                  // the text the editor read / last saved
+    this.dirty = false;
+    this.saving = false;
+    this.discard = false;               // leaving with unsaved changes asks once
+    this.editError = null;              // read/save problem, shown above the editor
   }
 
   // Re-derives the rows whenever the panel publishes a new target. Guarded by the
@@ -126,14 +145,23 @@ export default class GitDiff extends View {
     this.seq = seq;
     this.target = target ?? null;
     this.rows = []; this.uni = []; this.error = null;
+    // Another file was picked: leave the editor when nothing would be lost, and
+    // keep it (and its unsaved text) when there is.
+    if (this.editFile && !this.dirty && (target?.root !== this.editFile.root || target?.path !== this.editFile.path)) this.leave();
     if (!target || !target.root || !target.path) { this.loading = false; return; }
+    this.fetch(target, cx);
+  }
+
+  // Reads the patch this target names into both row shapes. Every fetch carries a
+  // token, so a save reloading the diff never races a target the panel published.
+  fetch(target, cx) {
+    const token = ++this.loadToken;
     this.loading = true;
-    const context = seq;
     cx.spawn(async (cx) => {
       let rows = null, error = null;
       try { rows = await loadRows(target); }
       catch (e) { error = String(e); }
-      if (this.seq !== context) return;
+      if (this.loadToken !== token) return;
       this.rows = rows?.side ?? [];
       this.uni = rows?.uni ?? [];
       this.error = error; this.loading = false;
@@ -141,13 +169,101 @@ export default class GitDiff extends View {
     });
   }
 
+  // ---- editing the live file ----
+
+  // Editable: this machine (writes are local), the file as it is on disk (not a
+  // commit's old version), and text.
+  editable(target) { return Boolean(target?.path) && !target.on && target.mode !== "commit" && !target.binary; }
+
+  leave() {
+    this.code?.release();
+    this.code = null; this.editFile = null; this.saved = null;
+    this.dirty = false; this.discard = false; this.editError = null;
+  }
+
+  startEdit(cx) {
+    const target = this.target;
+    if (!this.editable(target) || this.code) return;
+    const file = { root: target.root, path: target.path };
+    this.editFile = file; this.editError = null; this.discard = false;
+    const token = ++this.loadToken;
+    cx.spawn(async (cx) => {
+      let text = null;
+      try { text = await readTextFile(`${file.root}/${file.path}`); } catch {}
+      if (this.editFile !== file || this.loadToken !== token) return;
+      if (text === null) { this.editError = "This file is not on disk (deleted, or unreadable)"; cx.notify(); return; }
+      if (text.includes("\0")) { this.editError = "Binary file \u00b7 cannot edit"; cx.notify(); return; }
+      if (text.length >= MAX_EDIT) { this.editError = "File is too large to edit here"; cx.notify(); return; }
+      const t = theme();
+      this.code = EditorState.new({ language: language(file.path), value: text, font_family: settings().font_family, font_size: 11,
+        syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+      this.saved = text;
+      this.dirty = false;
+      // Its own cx: this fires long after the click that made the editor.
+      this.code.on("change", (_e, ccx) => { this.dirty = this.code.value() !== this.saved; this.discard = false; ccx.notify(); });
+      cx.notify();
+    });
+  }
+
+  save(cx) {
+    if (!this.code || !this.editFile || this.saving) return;
+    const file = this.editFile, text = this.code.value(), expected = this.saved;
+    if (text === expected) { this.dirty = false; cx.notify(); return; }
+    this.saving = true; this.editError = null;
+    cx.spawn(async (cx) => {
+      try {
+        // Refused when the file changed underneath: the snapshot in `saved` is the
+        // one this text was edited from, and overwriting a newer version loses it.
+        await writeTextFile(`${file.root}/${file.path}`, text, expected);
+        if (this.editFile !== file) return;
+        this.saved = text; this.dirty = false;
+        if (this.target) this.fetch(this.target, cx); // the diff behind is now stale
+      } catch (e) {
+        if (this.editFile === file) this.editError = `Cannot save \u00b7 ${e}`;
+      } finally {
+        if (this.editFile === file) { this.saving = false; cx.notify(); }
+      }
+    });
+  }
+
+  back(cx) {
+    if (!this.code) return;
+    // Leaving with unsaved changes takes a second press, so a stray click
+    // cannot drop them.
+    if (this.dirty && !this.discard) { this.discard = true; cx.notify(); return; }
+    this.leave();
+    cx.notify();
+  }
+
+  button(id, label, name, onClick, t, solid) {
+    const el = h_flex().id(id).flex_none().h(18).px(7).gap(5).items_center().rounded(5).cursor_pointer().text_size(10.5)
+      .on_click(onClick)
+      .child(icon(name).size(12))
+      .child(div().child(label));
+    return (solid ? el.bg(t.solid).text_color(t.solid_foreground) : el.bg(t.raised).border_1().border_color(t.border).text_color(t.muted))
+      .hover((s) => s.bg(solid ? t.solid : t.hover));
+  }
+
   mode(t) { return t.mode === "commit" ? `Commit ${t.commitShort ?? ""}`.trim() : t.mode === "staged" ? "Staged" : "Working Tree"; }
 
   header(t) {
+    if (this.editFile) {
+      const discard = this.dirty && this.discard;
+      return h_flex().h(26).flex_none().px(6).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+        .child(this.button("git-diff-back", discard ? "Discard changes?" : "Diff", "chevron-left",
+          (_e, cx) => { cx.stop_propagation(); this.back(cx); }, t, false))
+        .child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(discard ? t.ansi1 : t.dim)
+          .child(this.dirty ? "Editing \u00b7 modified" : "Editing"))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(this.editFile.path))
+        .child(this.button("git-diff-save", this.saving ? "Saving\u2026" : "Save", "disk",
+          (_e, cx) => { cx.stop_propagation(); this.save(cx); }, t, this.dirty));
+    }
     const target = this.target;
     return h_flex().h(26).flex_none().px(10).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .when(Boolean(target?.path), (e) => e.child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(this.mode(target))))
-      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(target?.path ? t.foreground : t.dim).child(target?.path ?? "Diff"));
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(target?.path ? t.foreground : t.dim).child(target?.path ?? "Diff"))
+      .when(this.editable(target), (e) => e.child(this.button("git-diff-edit", "Edit", "pencil",
+        (_e, cx) => { cx.stop_propagation(); this.startEdit(cx); }, t, false)));
   }
 
   cell(side, t) {
@@ -183,6 +299,13 @@ export default class GitDiff extends View {
         .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Source Control to compare it here"))));
   }
 
+  editorBody(t) {
+    if (!this.code) return v_flex().flex_1().min_h(0).p(12).text_color(t.dim).child(this.editError ?? "Loading\u2026");
+    return v_flex().flex_1().min_h(0)
+      .when(Boolean(this.editError), (e) => e.child(div().flex_none().px(10).py(4).bg(t.ansi1 + "22").text_color(t.ansi1).text_size(11).child(this.editError)))
+      .child(Editor.new(this.code).flex_1().min_h(0));
+  }
+
   render(cx) {
     this.sync(cx);
     const t = theme();
@@ -196,6 +319,10 @@ export default class GitDiff extends View {
       })
       .bg(t.background).text_color(t.foreground).text_size(11).font_family(MONO())
       .child(this.header(t))
-      .child(this.body(list, t));
+      .child(this.editFile ? this.editorBody(t) : this.body(list, t));
+  }
+
+  async close() {
+    try { this.code?.release(); } catch {}
   }
 }
