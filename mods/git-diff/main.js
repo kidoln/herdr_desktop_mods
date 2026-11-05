@@ -1,8 +1,10 @@
-// The side-by-side diff pane for the git panel. The panel writes what to compare
-// to shared("git.diff"); this pane reads it, fetches a byte-capped patch, and lays
-// the removed and added lines out in two aligned columns (old on the left, new on
-// the right) — a removed line and the added line that replaces it share a row, so
-// the columns always line up. Hunk headers and file metadata span the full width.
+// The diff pane for the git panel. The panel writes what to compare to
+// shared("git.diff"); this pane reads it and fetches a byte-capped patch. A wide
+// pane shows it side by side — removed and added lines in two aligned columns (old
+// left, new right), a removed line and the added line that replaces it sharing a
+// row. A narrow pane folds the same rows into one unified column (removals, then
+// additions), so lines are never squeezed. Hunk headers and file metadata span the
+// full width in both.
 //
 // It never writes to the repository, follows the panel (another click updates the
 // same pane), and follows the panel's machine for a remote space.
@@ -16,8 +18,9 @@ import { shared, exec, readTextFile, theme, settings } from "herdr";
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const CAP = 600000;      // bytes of a single patch we keep; the rest is dropped mid-stream.
 const MAX_LINES = 4000;  // diff lines we turn into rows; the rest is dropped.
-const ROW = 19;          // one row's height, shared by both columns.
-const GUT = 46;          // the line-number gutter inside each column.
+const ROW = 19;          // one row's height.
+const GUT = 46;          // the line-number gutter in a column.
+const NARROW = 420;      // below this width (design px), one column reads better than two.
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const countLines = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
 
@@ -29,32 +32,44 @@ const GREEN = () => (settings().dark ? "#3fb950" : "#1a7f37");
 const TINT_ALPHA = () => (settings().dark ? "3d" : "24");
 const tint = (sign) => (sign === "-" ? RED() + TINT_ALPHA() : sign === "+" ? GREEN() + TINT_ALPHA() : null);
 
-// A unified-diff line list into paired rows. Runs of "-" are paired with the "+"
-// run that follows, index by index; context lines fill both sides. Hunk headers
-// and file metadata become full-width rows.
+// A unified-diff line list, turned into rows two ways at once: `side` pairs each
+// run of "-" lines with the "+" run that follows, index by index (for the two-column
+// view); `uni` re-expands every run in unified order, removals then additions (for
+// the one-column view a narrow pane falls back to). Context lines fill both sides /
+// appear once. Hunk headers and file metadata become full-width rows in both.
 function buildRows(lines) {
-  const rows = [];
+  const side = [], uni = [];
   let old = 0, next = 0, minus = null, plus = null;
   const flush = () => {
     if (!minus && !plus) return;
     const a = minus ?? [], b = plus ?? [];
-    for (let i = 0; i < Math.max(a.length, b.length); i++) rows.push({ left: a[i] ?? null, right: b[i] ?? null });
+    for (let i = 0; i < Math.max(a.length, b.length); i++) side.push({ left: a[i] ?? null, right: b[i] ?? null });
+    for (const cell of a) uni.push(cell);
+    for (const cell of b) uni.push(cell);
     minus = plus = null;
   };
+  const full = (kind, text) => { const row = { full: kind, text }; side.push(row); uni.push(row); };
   for (const line of lines) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (hunk) { flush(); old = +hunk[1]; next = +hunk[2]; rows.push({ full: "hunk", text: line }); continue; }
+    if (hunk) { flush(); old = +hunk[1]; next = +hunk[2]; full("hunk", line); continue; }
     if (/^(diff --git|index |new file|deleted file|old mode|new mode|similarity|dissimilarity|rename |copy |\+\+\+ |--- |\\ No newline|Binary files )/.test(line)) {
-      flush(); rows.push({ full: "meta", text: line }); continue;
+      flush(); full("meta", line); continue;
     }
     const kind = line[0];
     if (kind === "-") { if (plus) flush(); minus = minus ?? []; minus.push({ n: old++, text: line.slice(1) || " ", sign: "-" }); continue; }
     if (kind === "+") { plus = plus ?? []; plus.push({ n: next++, text: line.slice(1) || " ", sign: "+" }); continue; }
-    if (kind === " ") { flush(); const text = line.slice(1) || " "; rows.push({ left: { n: old++, text, sign: " " }, right: { n: next++, text, sign: " " } }); continue; }
-    flush(); rows.push({ full: "meta", text: line });
+    if (kind === " ") {
+      flush();
+      const text = line.slice(1) || " ";
+      const cell = { n: next++, text, sign: " " };
+      side.push({ left: { n: old++, text, sign: " " }, right: cell });
+      uni.push(cell);
+      continue;
+    }
+    flush(); full("meta", line);
   }
   flush();
-  return rows;
+  return { side, uni };
 }
 
 // A byte-capped patch: `git ... | head -c CAP` so a huge diff stops early instead
@@ -96,7 +111,9 @@ export default class GitDiff extends View {
   init() {
     this.seq = null;
     this.target = null;
-    this.rows = [];
+    this.rows = [];   // paired rows, for the two-column view
+    this.uni = [];    // the same lines in unified order, for the one-column view
+    this.paneW = 0;   // the pane's width in design px (zoom-independent)
     this.loading = false; this.error = null;
   }
 
@@ -108,7 +125,7 @@ export default class GitDiff extends View {
     if (seq === this.seq) return;
     this.seq = seq;
     this.target = target ?? null;
-    this.rows = []; this.error = null;
+    this.rows = []; this.uni = []; this.error = null;
     if (!target || !target.root || !target.path) { this.loading = false; return; }
     this.loading = true;
     const context = seq;
@@ -117,7 +134,8 @@ export default class GitDiff extends View {
       try { rows = await loadRows(target); }
       catch (e) { error = String(e); }
       if (this.seq !== context) return;
-      this.rows = rows ?? [];
+      this.rows = rows?.side ?? [];
+      this.uni = rows?.uni ?? [];
       this.error = error; this.loading = false;
       cx.notify();
     });
@@ -147,27 +165,37 @@ export default class GitDiff extends View {
         .when(row.full === "hunk", (e) => e.bg(t.raised))
         .text_color(t.dim).child(row.text);
     }
-    return h_flex().w_full().h(ROW).flex_none().items_center()
-      .child(this.cell(row.left, t))
-      .child(div().w(1).h(ROW).flex_none().bg(t.border))
-      .child(this.cell(row.right, t));
+    if (row.left !== undefined) {
+      return h_flex().w_full().h(ROW).flex_none().items_center()
+        .child(this.cell(row.left, t))
+        .child(div().w(1).h(ROW).flex_none().bg(t.border))
+        .child(this.cell(row.right, t));
+    }
+    return h_flex().w_full().h(ROW).flex_none().items_center().child(this.cell(row, t));
   }
 
-  body(t) {
+  body(list, t) {
     return div().flex_1().min_h(0).relative().overflow_hidden()
-      .child(v_virtual_list("git-diff-rows", this.rows.length, ROW, (i) => String(i),
-        (range) => this.rows.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())
+      .child(v_virtual_list("git-diff-rows", list.length, ROW, (i) => String(i),
+        (range) => list.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())
       .child(Scrollbar.vertical("git-diff-rows").viewport_from_layout().absolute().inset_0())
-      .when(!this.rows.length, (e) => e.child(div().absolute().top(8).px(12).text_color(t.dim)
+      .when(!list.length, (e) => e.child(div().absolute().top(8).px(12).text_color(t.dim)
         .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Source Control to compare it here"))));
   }
 
   render(cx) {
     this.sync(cx);
     const t = theme();
+    // Two columns need room for a gutter and readable text in each; below that the
+    // same lines fold into one unified column instead of squeezing both.
+    const list = this.paneW > 0 && this.paneW < NARROW ? this.uni : this.rows;
     return v_flex().id("git-diff").size_full().min_h(0).overflow_hidden()
+      .on_size_change((size, cx) => {
+        const w = size.width / settings().zoom;
+        if (Math.abs(w - this.paneW) > 0.5) { this.paneW = w; cx.notify(); }
+      })
       .bg(t.background).text_color(t.foreground).text_size(11).font_family(MONO())
       .child(this.header(t))
-      .child(this.body(t));
+      .child(this.body(list, t));
   }
 }
