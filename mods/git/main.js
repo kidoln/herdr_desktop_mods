@@ -1,21 +1,29 @@
 // A git source-control panel for the right sidebar, in the shape of VS Code's:
 // a commit box (Commit / Commit & Push), Staged Changes / Changes groups, per-file
-// stage / unstage / discard, an inline diff, branch + ahead/behind status, and a
-// commit history (with the tags on each commit) in a panel below.
+// stage / unstage / discard, branch + ahead/behind status, and a commit history
+// (with the tags on each commit) in a panel below.
 //
-// Opening a commit is blob-free and fast: its message and changed-file names come
-// from the commit's own trees, and a file's patch loads only when you ask for it,
-// byte-capped. It follows the focused pane's repository, on this machine or a
-// remote space's. Reads write nothing under .git, so the folder watch stays quiet.
+// Clicking a file (or a file inside a commit) does not draw its diff here: it hands
+// the comparison to the `git-diff` pane, which shows it side by side in the main
+// area. Opening a commit stays blob-free and fast: its message and changed-file names
+// come from the commit's own trees. It follows the focused pane's repository, on this
+// machine or a remote space's. Reads write nothing under .git, so the folder watch
+// stays quiet.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run } from "herdr";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
+  // A mod pane (the git panel itself, or the git-diff pane) has no folder of its
+  // own: keep following the tab's terminal, so showing a diff never changes repo.
+  if (pane && !pane.terminal) {
+    const term = panes().find((p) => p.tab === pane.tab && p.terminal);
+    if (term?.cwd) return { cwd: term.cwd, on };
+  }
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
 }
 const ctxKey = () => JSON.stringify(location());
@@ -25,8 +33,6 @@ const ctxKey = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/git/${name}.svg`).flex_none();
-const countLines = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
-const CAP = 600000; // bytes of a single patch we keep; the rest is dropped mid-stream.
 
 // `git diff --numstat -z` records: "add\tdel\tpath" NUL-ended (path alone after --no-renames).
 function numstat(out) {
@@ -39,41 +45,6 @@ function numstat(out) {
   return map;
 }
 
-// Numbers each diff line once, so a frame only draws the rows on screen.
-function diffRows(lines) {
-  let old = 0, next = 0;
-  return lines.map((line) => {
-    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
-    const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
-    return { kind: "", text: line };
-  });
-}
-
-// A commit's file patch: file headers stay plain/unnumbered, so only real +/- lines count.
-function patchRows(lines) {
-  let old = 0, next = 0, inDiff = false;
-  return lines.map((line) => {
-    if (line.startsWith("diff --git")) { inDiff = true; return { kind: "meta", text: line }; }
-    if (line.startsWith("@@")) {
-      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-      if (match) { old = +match[1]; next = +match[2]; }
-      inDiff = true;
-      return { kind: "@", text: line };
-    }
-    if (!inDiff) return { kind: "", text: line };
-    if (/^(index |new file|deleted file|old mode|new mode|similarity|dissimilarity|rename |copy |\+\+\+ |--- |\\ No newline)/.test(line)) return { kind: "meta", text: line };
-    const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
-    return { kind: "", text: line };
-  });
-}
-
 // VS Code's letters: untracked reads U, conflicted reads !.
 const shownLetter = (f, staged) => f.conflict ? "!" : staged ? f.x : f.untracked ? "?" : f.y;
 const letterText = (l) => (l === "?" ? "U" : l === " " ? "M" : l);
@@ -83,7 +54,7 @@ const statusColor = (l, t) =>
 export default class Git extends View {
   init(_props, cx) {
     this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-    this.rows = []; this.diffWidth = 300;
+    this.seq = 0;
     this.collapsed = { staged: false, changes: false };
     this.historyCollapsed = false;
     this.message = ""; this.note = null; this.error = null;
@@ -112,11 +83,11 @@ export default class Git extends View {
     const { cwd, on } = location(), context = ctxKey();
     if (context !== this.context) {
       this.context = context; this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-      this.setRows([]); this.open = null; this.openStaged = false; this.commitView = null; this.commitFile = null;
+      this.commitView = null;
       this.message = ""; this.input.set_value("");
       this.error = null; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
       this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0;
-      this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false; this.closed = false;
+      this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false;
     }
     if (!cwd) return;
     this.loading = true;
@@ -126,7 +97,7 @@ export default class Git extends View {
         if (ctxKey() !== context) return;
         if (top.code !== 0) {
           this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-          this.setRows([]); this.open = null; this.commitView = null; this.commitFile = null; this.error = "Not a git repository"; return;
+          this.commitView = null; this.error = "Not a git repository"; return;
         }
         const root = top.stdout.trim();
         const g = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -187,61 +158,54 @@ export default class Git extends View {
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
         this.unstaged = parsed.filter((f) => f.unstaged).map((f) => ({ ...f, ...(workStats[f.path] ?? {}) }));
         this.error = null; this.watch(root, cx);
-        // Show the first changed file's diff until the user picks another or closes it.
-        if (!this.open && !this.closed && !this.commitView && this.unstaged.length) { this.open = this.unstaged[0].path; this.openStaged = false; this.setRows([]); }
-        if (this.open && !parsed.some((f) => f.path === this.open)) { this.open = null; this.setRows([]); }
-        // A commit's patch never changes, so it is read once when opened. A background
-        // refresh only retries the file list if that first read has not succeeded yet.
-        if (this.commitView) {
-          if (!this.commitFile && !this.commitView.loaded) {
-            try { await this.loadCommit(this.commitView.hash, context); }
-            catch (e) { if (ctxKey() === context) this.note = `Cannot read this commit: ${e}`; }
-          }
-        } else if (this.open) {
-          try { await this.load(this.open, this.openStaged, context); }
-          catch (e) { if (ctxKey() === context) this.rowsError(e); }
+        // A commit's file list never changes, so it is read once when opened. A
+        // background refresh only retries it if that first read has not succeeded yet.
+        if (this.commitView && !this.commitView.loaded) {
+          try { await this.loadCommit(this.commitView.hash, context); }
+          catch (e) { if (ctxKey() === context) this.note = `Cannot read this commit: ${e}`; }
         }
       } catch (e) { if (ctxKey() === context) this.error = String(e); }
       finally { this.loading = false; cx.notify(); }
     });
   }
 
-  // A byte-capped patch: `git ... | head -c CAP` so a huge diff stops early instead of
-  // stalling or blowing the output limit. Falls back to a plain (also capped) call if
-  // there is no `sh`, and throws with git's own message when the command truly fails.
-  async patch(root, on, args) {
-    try {
-      const script = `git --no-optional-locks -c core.fsmonitor=false -c diff.autoRefreshIndex=false "$@" | head -c ${CAP}`;
-      const r = await exec("sh", ["-c", script, "git", ...args], { cwd: root, on });
-      if (r.code === 0 && r.stdout) return r.stdout;
-    } catch {}
-    const r = await exec("git", [...READ, ...args], { cwd: root, on });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "git failed");
-    return r.stdout.slice(0, CAP);
+  // ---- the side-by-side pane ----
+
+  diffPane(tab) {
+    return panes().find((p) => p.mod === "git-diff" && p.tab === tab) ?? null;
   }
 
-  rowsError(e) { this.setRows([{ kind: "", text: `Cannot preview this diff: ${e}` }]); }
+  // The comparison the git-diff pane is showing, but only while its pane is up in
+  // the current tab — a closed pane clears the row highlight.
+  shownTarget() {
+    const target = shared("git.diff");
+    if (!target?.path) return null;
+    return this.diffPane(focused()?.tab) ? target : null;
+  }
 
-  async load(path, staged, context) {
-    const root = this.root, on = this.on, file = this.files.find((f) => f.path === path);
-    if (!file) return;
-    let lines;
-    if (file.untracked && !staged) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file \u00b7 no text diff"];
-      else {
-        const n = countLines(text);
-        lines = [`@@ -0,0 +1,${n} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map((l) => `+${l}`)];
-      }
-    } else {
-      const out = await this.patch(root, on, ["diff", ...(staged ? ["--cached"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path]);
-      const all = out.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = !out.trim() || first < 0 ? [file.binary ? "Binary file changed" : "No text diff"] : all.slice(first);
-    }
-    if (ctxKey() === context && this.open === path && this.openStaged === staged && !this.commitView) {
-      this.setFileRows(diffRows(lines.slice(0, 1500)), lines);
-    }
+  // Hand the comparison to the git-diff pane: publish it, and open the pane in the
+  // focused tab if it is not there yet. A later click updates the same pane. The
+  // pane splits off the focused terminal, or the tab's first one when a mod pane
+  // (this panel) holds the keyboard.
+  openDiff(target, cx) {
+    const f = focused(), tab = f?.tab ?? null;
+    const anchor = (f?.pane && panes().find((p) => p.pane === f.pane && p.terminal)) ? f.pane
+      : panes().find((p) => p.tab === tab && p.terminal)?.pane ?? null;
+    const existing = this.diffPane(tab);
+    this.seq += 1;
+    setShared("git.diff", {
+      seq: this.seq,
+      mode: target.mode,
+      root: this.root,
+      on: this.on,
+      path: target.path,
+      untracked: Boolean(target.untracked),
+      binary: Boolean(target.binary),
+      commit: target.commit ?? null,
+      commitShort: target.commitShort ?? null,
+    });
+    if (!existing && anchor) run("pane.split", { direction: "right", pane: anchor, mod: "git-diff" });
+    cx.notify();
   }
 
   // Opening a commit reads only its message and the names of the files it changed —
@@ -262,47 +226,18 @@ export default class Git extends View {
     }
     if (ctxKey() !== context || this.commitView?.hash !== hash) return;
     this.commitView = { hash: H ?? hash, short: short ?? hash.slice(0, 7), author, when, subject: subject ?? "", body, files, loaded: true };
-    this.commitFile = null;
-    this.setRows([]);
   }
-
-  async loadCommitFile(hash, path, context) {
-    hash = String(hash ?? "").trim();
-    const out = await this.patch(this.root, this.on, ["show", "--no-color", "--no-ext-diff", "--no-textconv", hash, "--", path]);
-    if (ctxKey() !== context || this.commitView?.hash !== hash || this.commitFile !== path) return;
-    const all = out.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-    const lines = first >= 0 ? all.slice(first) : all;
-    this.setFileRows(patchRows(lines.slice(0, 1500)), lines);
-  }
-
-  setFileRows(rows, lines) {
-    this.rows = rows;
-    this.diffWidth = Math.max(300, ...lines.map((line) => line.length * 7 + 50));
-  }
-  setRows(rows) { this.rows = rows; this.diffWidth = Math.max(300, ...rows.map((r) => (r.text?.length ?? 0) * 7 + 50)); }
 
   pick(f, staged, cx) {
-    const same = this.open === f.path && this.openStaged === staged && !this.commitView;
-    this.commitView = null; this.commitFile = null;
-    this.open = same ? null : f.path; this.openStaged = staged; this.setRows([]); this.note = null;
-    this.closed = !this.open;
-    if (!same) {
-      const context = this.context;
-      cx.spawn(async (cx) => {
-        try { await this.load(f.path, staged, context); }
-        catch (e) { if (ctxKey() === context) this.rowsError(e); }
-        cx.notify();
-      });
-    }
-    cx.notify();
+    this.commitView = null; this.note = null;
+    this.openDiff({ mode: staged ? "staged" : "work", path: f.path, untracked: f.untracked, binary: f.binary }, cx);
   }
 
   pickCommit(c, cx) {
-    const same = this.commitView?.hash === c.hash && !this.commitFile;
-    this.open = null; this.openStaged = false; this.closed = true; this.note = null;
-    if (same) { this.commitView = null; this.commitFile = null; this.setRows([]); cx.notify(); return; }
-    this.commitFile = null; this.commitView = { hash: c.hash, short: c.short, subject: c.subject, body: "", files: [], loaded: false };
-    this.setRows([]);
+    const same = this.commitView?.hash === c.hash;
+    this.note = null;
+    if (same) { this.commitView = null; cx.notify(); return; }
+    this.commitView = { hash: c.hash, short: c.short, subject: c.subject, body: "", files: [], loaded: false };
     const context = this.context;
     cx.spawn(async (cx) => {
       try { await this.loadCommit(c.hash, context); }
@@ -313,18 +248,11 @@ export default class Git extends View {
   }
 
   pickCommitFile(path, cx) {
-    this.commitFile = path; this.note = null; this.setRows([]);
-    const context = this.context, hash = this.commitView.hash;
-    cx.spawn(async (cx) => {
-      try { await this.loadCommitFile(hash, path, context); }
-      catch (e) { if (ctxKey() === context) this.rowsError(e); }
-      cx.notify();
-    });
-    cx.notify();
+    if (!this.commitView) return;
+    this.openDiff({ mode: "commit", path, commit: this.commitView.hash, commitShort: this.commitView.short }, cx);
   }
 
-  backToCommit(cx) { this.commitFile = null; this.setRows([]); cx.notify(); }
-  closeDiff(cx) { this.open = null; this.commitView = null; this.commitFile = null; this.closed = true; this.setRows([]); cx.notify(); }
+  closeCommit(cx) { this.commitView = null; cx.notify(); }
 
   // Every write goes through here: one at a time, then a refresh, errors inline.
   mutate(cx, fn) {
@@ -395,8 +323,7 @@ export default class Git extends View {
     if (e.key === "escape") {
       if (this.confirmAll || this.confirm) { this.confirmAll = false; this.confirm = null; }
       else if (this.typing) { this.typing = false; this.handle.focus(); }
-      else if (this.commitFile) { this.commitFile = null; this.setRows([]); }
-      else if (this.open || this.commitView) { this.closeDiff(cx); return; }
+      else if (this.commitView) { this.commitView = null; }
       else return;
       cx.stop_propagation(); cx.notify();
     } else if (e.keystroke === "cmd-enter" || e.keystroke === "ctrl-enter") {
@@ -511,7 +438,8 @@ export default class Git extends View {
   fileRow(t, f, staged) {
     const rowKey = `${staged ? "s" : "w"}:${f.path}`;
     const hovered = this.hovered === rowKey;
-    const selected = this.open === f.path && this.openStaged === staged && !this.commitView;
+    const target = this.shownTarget();
+    const selected = Boolean(target) && target.mode === (staged ? "staged" : "work") && target.path === f.path;
     const confirming = this.confirm === rowKey;
     const letter = letterText(shownLetter(f, staged)), color = statusColor(shownLetter(f, staged), t);
     const parts = f.path.split("/"), name = parts.pop(), dir = parts.length ? parts.join("/") + "/" : "";
@@ -555,16 +483,6 @@ export default class Git extends View {
       .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? ""));
   }
 
-  diffRow({ kind, number, text }, t) {
-    if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    if (kind === "meta") return div().w_full().px(12).h(20).flex_none().truncate().text_color(t.dim).child(text);
-    return h_flex().w_full().h(20).flex_none().gap(10)
-      .when(kind === "+", (e) => e.bg(t.ansi2 + "18"))
-      .when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
-      .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-      .child(div().flex_1().min_w(0).truncate().child(text));
-  }
-
   confirmAllBar(t) {
     return h_flex().flex_none().px(10).py(8).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border)
       .child(div().flex_1().text_size(12).text_color(t.foreground).child("Discard all changes?"))
@@ -598,17 +516,20 @@ export default class Git extends View {
           .when(!count, (e) => e.child(div().p(10).text_size(12).text_color(t.dim).child(this.hasHead ? "No commits" : "No commits yet")))));
   }
 
-  // A commit, before a file is chosen: its message and the names of the files it changed.
+  // A commit's message and the names of the files it changed. Choosing a file
+  // hands its diff to the git-diff pane in the main area, side by side.
   commitList(t) {
     const c = this.commitView;
     const files = c.files.slice(0, 800);
+    const target = this.shownTarget();
+    const isShown = (path) => Boolean(target) && target.mode === "commit" && target.commit === c.hash && target.path === path;
     return v_flex().flex_1().min_h(0).border_t(1).border_color(t.border)
       .child(h_flex().h(30).flex_none().pl(12).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("Commit"))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).font_family(MONO()).child(`${c.short} ${c.subject}`))
-        .child(div().id("git-diff-close").w(20).h(20).flex().items_center().justify_center().rounded(5).cursor_pointer()
+        .child(div().id("git-commit-close").w(20).h(20).flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.closeDiff(cx); })
+          .on_click((_e, cx) => { cx.stop_propagation(); this.closeCommit(cx); })
           .child(icon("close").size(13).text_color(t.dim))))
       .child(v_flex().id("git-commit-body").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(3)
         .child(div().text_size(12).font_semibold().text_color(t.foreground).child(c.subject || "(no subject)"))
@@ -617,37 +538,12 @@ export default class Git extends View {
         .when(!files.length, (e) => e.child(div().text_size(12).text_color(t.dim).child("No file changes")))
         .children(files.map((f) =>
           h_flex().id(`git-cf-${f.path}`).h(26).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
+            .when(isShown(f.path), (e) => e.bg(t.selected))
             .hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
             .child(div().w(14).flex_none().text_center().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status))
             .child(div().flex_1().min_w(0).truncate().child(f.path))))
         .when(c.files.length > files.length, (e) => e.child(div().p(6).text_size(11).text_color(t.dim).child(`\u2026 and ${c.files.length - files.length} more`))));
-  }
-
-  diffArea(t) {
-    if (this.commitView && !this.commitFile) return this.commitList(t);
-    const commit = this.commitFile ? this.commitView : null;
-    const badge = commit ? "Commit" : this.openStaged ? "Staged" : "Working";
-    const label = commit ? `${this.commitView.short} \u00b7 ${this.commitFile}` : this.open;
-    return v_flex().flex_1().min_h(0).border_t(1).border_color(t.border)
-      .child(h_flex().h(30).flex_none().pl(commit ? 6 : 12).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
-        .when(Boolean(commit), (e) => e.child(div().id("git-diff-back").w(20).h(20).flex().items_center().justify_center().rounded(5).cursor_pointer()
-          .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.backToCommit(cx); })
-          .child(icon("chevron-left").size(14).text_color(t.dim))))
-        .child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(badge))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).font_family(MONO()).child(label))
-        .child(div().id("git-diff-close").w(20).h(20).flex().items_center().justify_center().rounded(5).cursor_pointer()
-          .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.closeDiff(cx); })
-          .child(icon("close").size(13).text_color(t.dim))))
-      .child(div().flex_1().min_h(0).relative().font_family(MONO()).text_size(11)
-        .child(div().id("git-diff-x").size_full().overflow_x_scrollbar()
-          .child(div().w_full().min_w(this.diffWidth).h_full()
-            .child(v_virtual_list("git-diff", this.rows.length, 20, (i) => String(i),
-              (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-        .child(Scrollbar.vertical("git-diff").viewport_from_layout().absolute().inset_0())
-        .when(!this.rows.length, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Loading\u2026"))));
   }
 
   render(cx) {
@@ -668,7 +564,7 @@ export default class Git extends View {
 
     let body = v_flex().id("git-list").w_full().min_h(0).py(4).overflow_y_scrollbar()
       .children(list.map((r) => (r.kind === "file" ? this.fileRow(t, r.f, r.staged) : this.sectionRow(t, r))));
-    body = this.open || this.commitView ? body.flex_none().h(listHeight) : body.flex_1();
+    body = this.commitView ? body.flex_none().h(listHeight) : body.flex_1();
 
     return v_flex().id("git").size_full().min_h(0).rounded(10).overflow_hidden()
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
@@ -682,6 +578,6 @@ export default class Git extends View {
       .when(Boolean(this.root), (e) => e.child(body))
       .when(Boolean(this.root), (e) => e.child(this.historySection(t)))
       .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)))
-      .when(Boolean(this.open || this.commitView), (e) => e.child(this.diffArea(t)));
+      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)));
   }
 }
