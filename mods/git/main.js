@@ -1,7 +1,13 @@
 // A git source-control panel for the right sidebar, in the shape of VS Code's:
 // a commit box (Commit / Commit & Push), Staged Changes / Changes groups, per-file
-// stage / unstage / discard, branch + ahead/behind status, and a commit history
-// (with the tags on each commit) in a panel below.
+// stage / unstage / discard, branch + ahead/behind status (with the upstream it
+// tracks), and a commit history (with the tags on each commit) in a panel below.
+//
+// The history is not just HEAD: every local and remote branch's commits appear
+// together, newest first, and the color dot before each subject is that commit's
+// branch lamp (a remote branch borrows its local branch's color). Right-clicking a
+// commit opens a small menu at the pointer whose Copy Hash puts the full SHA on the
+// clipboard -- the row itself shows no hash.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane, which shows it side by side in the main
@@ -12,7 +18,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -34,6 +40,26 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/git/${name}.svg`).flex_none();
 
+// One lamp color per branch, stable across reloads and repos: the same name always
+// hashes to the same palette entry, and two branches shown at once never share one
+// (refresh() probes a colliding name onward). A remote branch borrows its local
+// branch's color, so origin/main reads as main.
+const LAMPS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
+function lampIndex(name) {
+  let h = 0;
+  for (const ch of String(name ?? "")) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return h % LAMPS.length;
+}
+
+// The clipboard on this machine: pbcopy (macOS), else wl-copy / xclip (Linux).
+// Windows has neither, and the caller reports the failure.
+async function copyText(text) {
+  for (const script of ["printf %s \"$1\" | pbcopy", "printf %s \"$1\" | wl-copy", "printf %s \"$1\" | xclip -selection clipboard"]) {
+    try { const r = await exec("sh", ["-c", script, "sh", text]); if (r.code === 0) return true; } catch {}
+  }
+  return false;
+}
+
 // `git diff --numstat -z` records: "add\tdel\tpath" NUL-ended (path alone after --no-renames).
 function numstat(out) {
   const map = {};
@@ -53,6 +79,14 @@ const statusColor = (l, t) =>
 
 export default class Git extends View {
   init(_props, cx) {
+    // An overlay copy renders the commit context menu (see commitMenu): no panel,
+    // no polling — just a focus handle for its keys. (props() is read, not the
+    // argument: an overlay copy is not given one at init time.)
+    if (props()?.commitMenu) {
+      this.menuHandle = cx.focus_handle();
+      this.menuHandle.focus();
+      return;
+    }
     this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
     this.seq = 0;
     this.collapsed = { staged: false, changes: false };
@@ -86,7 +120,7 @@ export default class Git extends View {
       this.commitView = null;
       this.message = ""; this.input.set_value("");
       this.error = null; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
-      this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0;
+      this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0; this.remotes = null; this.lamps = null;
       this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false;
     }
     if (!cwd) return;
@@ -124,20 +158,70 @@ export default class Git extends View {
           if (cnt.code === 0) { const [a, b] = cnt.stdout.trim().split(/\s+/); ahead = Number(a) || 0; behind = Number(b) || 0; }
         }
 
-        // Commit history: hash, author, relative date, refs (tags), subject. Tree-only.
+        // Commit history across the branches, not just HEAD: hash, parents, author,
+        // relative date, refs (tags and branch tips), subject. Tree-only. `%D` names
+        // the refs at the tips they point to; the walk below colors every commit by
+        // the first branch that reaches it.
         const commits = [];
+        let remotes = new Set(), lamps = new Map();
         if (head.code === 0) {
-          const log = await g(["log", "-n", "80", "--decorate=short", "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s%x1e"]);
+          const locals = await g(["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+          const remoteRefs = await g(["for-each-ref", "--format=%(refname:short)", "refs/remotes"]);
+          const localSet = new Set(locals.stdout.split("\n").map((s) => s.trim()).filter(Boolean));
+          remotes = new Set(remoteRefs.stdout.split("\n").map((s) => s.trim()).filter((s) => s && !/\/HEAD$/.test(s)));
+          const log = await g(["log", "HEAD", "--branches", "--remotes", "-n", "120", "--decorate=short",
+            "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s%x1e"]);
           if (log.code === 0) for (const rec of log.stdout.split("\x1e")) {
             // git separates entries with a newline, so every record but the first starts with one.
             const fields = rec.replace(/^\n/, "").split("\x1f").map((s) => s.trim());
             if (!fields[0]) continue;
-            const [hash, short, author, when, refs, subject] = fields;
-            const tags = [];
+            const [hash, parents, short, author, when, refs, subject] = fields;
+            const tags = [], tips = [];
             for (const token of (refs ?? "").split(", ").map((s) => s.trim()).filter(Boolean)) {
-              if (token.startsWith("tag: ")) tags.push(token.slice(5));
+              if (token.startsWith("tag: ")) { tags.push(token.slice(5)); continue; }
+              // "HEAD -> main" and "origin/HEAD -> origin/main" name the ref they point at.
+              const name = token.replace(/^.* -> /, "");
+              if (!name || name === "HEAD" || /\/HEAD$/.test(name)) continue;
+              tips.push(name);
             }
-            commits.push({ hash, short: short ?? hash.slice(0, 7), author, when, subject: subject ?? "", tags });
+            commits.push({ hash, short: short ?? hash.slice(0, 7), author, when, subject: subject ?? "",
+              tags, tips, parents: (parents ?? "").split(" ").filter(Boolean), owner: null });
+          }
+          // Each commit takes the lamp of the first branch whose history reaches it:
+          // the checked-out branch first, then local branches, then remotes. Shared
+          // ancestry reads as the branch it belongs to, a side branch's own commits
+          // stand out, and a branch whose tip is outside the window colors nothing.
+          const byHash = new Map(commits.map((c, i) => [c.hash, i]));
+          const tipAt = new Map();
+          for (const c of commits) for (const name of c.tips) if (!tipAt.has(name)) tipAt.set(name, c.hash);
+          const order = [];
+          if (branch && localSet.has(branch) && tipAt.has(branch)) order.push(branch);
+          for (const name of localSet) if (name !== branch && tipAt.has(name)) order.push(name);
+          for (const name of remotes) if (tipAt.has(name)) order.push(name);
+          for (const name of order) {
+            const stack = [byHash.get(tipAt.get(name))];
+            while (stack.length) {
+              const i = stack.pop();
+              if (i === undefined || commits[i].owner) continue;
+              commits[i].owner = name;
+              for (const p of commits[i].parents) { const k = byHash.get(p); if (k !== undefined) stack.push(k); }
+            }
+          }
+          // Lamps for the branches shown: each keeps the color its name hashes to;
+          // a name whose lamp is taken probes onward, in this order, so two branches
+          // in one window never share a light.
+          const keyOf = (name) => (remotes.has(name) ? name.replace(/^[^/]+\//, "") : name);
+          const keys = [];
+          for (const name of order) { const k = keyOf(name); if (!keys.includes(k)) keys.push(k); }
+          const taken = new Set(), deferred = [];
+          for (const k of keys) {
+            const i = lampIndex(k);
+            if (taken.has(i)) deferred.push(k); else { taken.add(i); lamps.set(k, LAMPS[i]); }
+          }
+          for (const k of deferred) {
+            let i = lampIndex(k);
+            while (taken.has(i)) i = (i + 1) % LAMPS.length;
+            taken.add(i); lamps.set(k, LAMPS[i]);
           }
         }
 
@@ -153,6 +237,7 @@ export default class Git extends View {
         if (ctxKey() !== context) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.headSha = head.code === 0 ? head.stdout.trim() : null;
         this.branch = branch; this.upstream = upstream; this.ahead = ahead; this.behind = behind;
+        this.remotes = remotes; this.lamps = lamps;
         this.commits = commits;
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
@@ -380,8 +465,11 @@ export default class Git extends View {
         .child(icon(name).size(12).text_color(t.accent))
         .when(count > 0, (e) => e.child(div().text_size(11).text_color(t.accent).child(String(count))));
     return h_flex().h(30).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
-      .child(icon("branch").size(13).text_color(t.muted))
-      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
+      .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
+      .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
+        .when(Boolean(this.upstream), (e) => e.child(div().flex_none().max_w(170).truncate().text_size(11).text_color(t.dim)
+          .child(`\u2192 ${this.upstream}`))))
       .when(!this.upstream, (e) => e.child(
         h_flex().id("git-publish").h(22).px(8).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -469,6 +557,52 @@ export default class Git extends View {
       .children(hovered || confirming ? actions : []);
   }
 
+  // The lamp key for a ref: a remote branch borrows its local branch's color.
+  colorOf(name) { return name && this.remotes?.has(name) ? name.replace(/^[^/]+\//, "") : name; }
+
+  // The palette entry ("ansi4", ...) for a ref: this refresh's assignment when the
+  // branch is shown, else its own hash.
+  lampOf(name) {
+    const key = this.colorOf(name);
+    return this.lamps?.get(key) ?? LAMPS[lampIndex(key)];
+  }
+
+  // Right-clicking a commit opens a small menu (an overlay copy of this mod, which
+  // renders the menu only) at the pointer: the branch lamp, the commit, Copy Hash.
+  commitMenu(t, c) {
+    openOverlay({ mod: "git", kind: "popup", width: 250,
+      props: { commitMenu: { hash: c.hash, short: c.short, subject: c.subject, lamp: c.owner ? this.lampOf(c.owner) : null } } });
+  }
+
+  // The overlay copy's whole render. Copy runs before the popup closes, so its
+  // task is not cancelled with the copy.
+  commitMenuView(t, m) {
+    const close = () => closeOverlay(props().overlay);
+    const copy = (cx) => cx.spawn(async () => {
+      const ok = await copyText(m.hash);
+      notify(ok
+        ? { title: "Hash copied", body: m.short, timeout: 1400 }
+        : { title: "Cannot copy", body: "No clipboard tool found (pbcopy, wl-copy, xclip)", level: "warning", timeout: 2200 });
+      close();
+    });
+    return v_flex().id("git-commit-menu").w_full().p(5).bg(t.popover).text_size(12.8)
+      .track_focus(this.menuHandle)
+      .on_key_down((e, cx) => {
+        if (e.key === "escape") { cx.stop_propagation(); close(); }
+        else if (e.key === "enter") { cx.stop_propagation(); copy(cx); }
+      })
+      .child(h_flex().h(24).px(8).gap(8).items_center()
+        .when(Boolean(m.lamp), (e) => e.child(div().size(9).flex_none().rounded(5).bg(t[m.lamp])))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${m.short} ${m.subject || ""}`)))
+      .child(div().mx(7).my(3).h(1).bg(t.border))
+      .child(h_flex().id("git-menu-copy").h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => copy(cx))
+        .child(icon("copy").size(14).text_color(t.muted))
+        .child(div().flex_1().child("Copy Hash"))
+        .child(div().text_size(11).text_color(t.dim).child("Enter")));
+  }
+
   commitRow(t, c) {
     const open = this.commitView?.hash === c.hash;
     const isHead = c.hash === this.headSha;
@@ -476,7 +610,8 @@ export default class Git extends View {
       .when(open, (e) => e.bg(t.selected))
       .when(!open, (e) => e.hover((s) => s.bg(t.hover)))
       .on_click((_e, cx) => this.pickCommit(c, cx))
-      .child(div().flex_none().text_size(11).font_family(MONO()).text_color(open ? t.accent : t.dim).child(c.short))
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.commitMenu(t, c); })
+      .child(div().size(9).flex_none().rounded(5).bg(c.owner ? t[this.lampOf(c.owner)] : t.dim))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
       .children(c.tags.map((tag) => this.tagChip(t, tag)))
       .when(isHead, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(this.branch ?? "HEAD")))
@@ -547,6 +682,7 @@ export default class Git extends View {
   }
 
   render(cx) {
+    if (props()?.commitMenu) return this.commitMenuView(theme(), props().commitMenu);
     if (ctxKey() !== this.context) this.refresh(cx);
     const t = theme();
 
