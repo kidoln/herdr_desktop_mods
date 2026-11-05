@@ -18,10 +18,16 @@ const CAP = 600000;      // bytes of a single patch we keep; the rest is dropped
 const MAX_LINES = 4000;  // diff lines we turn into rows; the rest is dropped.
 const ROW = 19;          // one row's height, shared by both columns.
 const GUT = 46;          // the line-number gutter inside each column.
-const CHAR = 6.7;        // approximate advance of the 11px monospace face.
-const MAX_CHARS = 400;   // the widest a column grows from one line, before it truncates.
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const countLines = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
+
+// Real red / green row tints: saturated bases at a readable alpha. The theme's ANSI
+// red and green are pastel (built for text on a terminal), so at a low alpha they
+// wash out to gray; these keep their hue over any theme background, dark or light.
+const RED = () => (settings().dark ? "#f85149" : "#cf222e");
+const GREEN = () => (settings().dark ? "#3fb950" : "#1a7f37");
+const TINT_ALPHA = () => (settings().dark ? "3d" : "24");
+const tint = (sign) => (sign === "-" ? RED() + TINT_ALPHA() : sign === "+" ? GREEN() + TINT_ALPHA() : null);
 
 // A unified-diff line list into paired rows. Runs of "-" are paired with the "+"
 // run that follows, index by index; context lines fill both sides. Hunk headers
@@ -49,18 +55,6 @@ function buildRows(lines) {
   }
   flush();
   return rows;
-}
-
-// How wide each column grows, from its longest line (bounded, so one huge line
-// cannot blow up the layout).
-function widths(rows) {
-  let left = 0, right = 0;
-  for (const row of rows) {
-    if (row.full) continue;
-    left = Math.max(left, row.left?.text.length ?? 0);
-    right = Math.max(right, row.right?.text.length ?? 0);
-  }
-  return { left: GUT + Math.min(left, MAX_CHARS) * CHAR + 12, right: GUT + Math.min(right, MAX_CHARS) * CHAR + 12 };
 }
 
 // A byte-capped patch: `git ... | head -c CAP` so a huge diff stops early instead
@@ -103,7 +97,6 @@ export default class GitDiff extends View {
     this.seq = null;
     this.target = null;
     this.rows = [];
-    this.leftW = 0; this.rightW = 0;
     this.loading = false; this.error = null;
   }
 
@@ -125,8 +118,6 @@ export default class GitDiff extends View {
       catch (e) { error = String(e); }
       if (this.seq !== context) return;
       this.rows = rows ?? [];
-      const w = widths(this.rows);
-      this.leftW = w.left; this.rightW = w.right;
       this.error = error; this.loading = false;
       cx.notify();
     });
@@ -141,11 +132,12 @@ export default class GitDiff extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(target?.path ? t.foreground : t.dim).child(target?.path ?? "Diff"));
   }
 
-  cell(side, t, minW) {
-    const tint = side?.sign === "-" ? t.ansi1 + "18" : side?.sign === "+" ? t.ansi2 + "18" : null;
-    return h_flex().flex_1().min_w(minW).h(ROW).items_center().overflow_hidden()
-      .when(Boolean(tint), (e) => e.bg(tint))
-      .child(div().w(GUT).flex_none().pr(8).text_right().text_color(t.dim).child(side ? String(side.n) : ""))
+  cell(side, t) {
+    const color = tint(side?.sign);
+    const gutter = side?.sign === "-" ? RED() : side?.sign === "+" ? GREEN() : t.dim;
+    return h_flex().flex_1().min_w(0).h(ROW).items_center().overflow_hidden()
+      .when(Boolean(color), (e) => e.bg(color))
+      .child(div().w(GUT).flex_none().pr(8).text_right().text_color(gutter).child(side ? String(side.n) : ""))
       .child(div().flex_1().min_w(0).truncate().child(side ? side.text : ""));
   }
 
@@ -156,18 +148,15 @@ export default class GitDiff extends View {
         .text_color(t.dim).child(row.text);
     }
     return h_flex().w_full().h(ROW).flex_none().items_center()
-      .child(this.cell(row.left, t, this.leftW))
+      .child(this.cell(row.left, t))
       .child(div().w(1).h(ROW).flex_none().bg(t.border))
-      .child(this.cell(row.right, t, this.rightW));
+      .child(this.cell(row.right, t));
   }
 
   body(t) {
-    const totalW = Math.max(this.leftW + this.rightW + 1, 240);
-    return div().flex_1().min_h(0).relative()
-      .child(div().id("git-diff-x").size_full().overflow_x_scrollbar()
-        .child(div().w_full().min_w(totalW).h_full()
-          .child(v_virtual_list("git-diff-rows", this.rows.length, ROW, (i) => String(i),
-            (range) => this.rows.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())))
+    return div().flex_1().min_h(0).relative().overflow_hidden()
+      .child(v_virtual_list("git-diff-rows", this.rows.length, ROW, (i) => String(i),
+        (range) => this.rows.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())
       .child(Scrollbar.vertical("git-diff-rows").viewport_from_layout().absolute().inset_0())
       .when(!this.rows.length, (e) => e.child(div().absolute().top(8).px(12).text_color(t.dim)
         .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Source Control to compare it here"))));
