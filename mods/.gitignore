@@ -1,0 +1,9 @@
+# Type stubs rewritten by Herdr on every start.
+**/gpui-kit.d.ts
+
+# Hot-reload failure notes.
+*.error
+
+# OS / tooling noise.
+.DS_Store
+node_modules/
