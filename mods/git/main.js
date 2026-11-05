@@ -5,9 +5,12 @@
 //
 // The history is not just HEAD: every local and remote branch's commits appear
 // together, newest first, and the color dot before each subject is that commit's
-// branch lamp (a remote branch borrows its local branch's color). Right-clicking a
-// commit opens a small menu at the pointer whose Copy Hash puts the full SHA on the
-// clipboard -- the row itself shows no hash.
+// branch lamp (a remote branch borrows its local branch's color). Clicking the
+// branch name drops the list of every branch: pick one or more and the history
+// narrows to the commits their histories reach (nothing picked: all). Right-
+// clicking a commit opens a small menu at the pointer whose Copy Hash puts the
+// full SHA on the clipboard -- the row itself shows no hash. The Commits pane's
+// top edge drags to size it, and the size is remembered.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane, which shows it side by side in the main
@@ -91,6 +94,15 @@ export default class Git extends View {
     this.seq = 0;
     this.collapsed = { staged: false, changes: false };
     this.historyCollapsed = false;
+    // The branch list dropped from the branch row, and the refs picked in it
+    // (nothing picked: every branch). The Commits pane's height drags on its
+    // top edge and is remembered; `unit` is window units per design pixel,
+    // measured on the drag strip (1 until it first lays out).
+    this.branchPick = false; this.picked = new Set();
+    this.localRefs = []; this.remoteRefs = [];
+    const saved = Number(localStorage.getItem("logHeight"));
+    this.logHeight = Number.isFinite(saved) && saved >= 72 ? Math.min(saved, 900) : 190;
+    this.resize = null; this.size = null; this.unit = 1;
     this.message = ""; this.note = null; this.error = null;
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
@@ -121,6 +133,7 @@ export default class Git extends View {
       this.message = ""; this.input.set_value("");
       this.error = null; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
       this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0; this.remotes = null; this.lamps = null;
+      this.localRefs = []; this.remoteRefs = []; this.branchPick = false; this.picked = new Set(); this.resize = null;
       this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false;
     }
     if (!cwd) return;
@@ -163,12 +176,14 @@ export default class Git extends View {
         // the refs at the tips they point to; the walk below colors every commit by
         // the first branch that reaches it.
         const commits = [];
-        let remotes = new Set(), lamps = new Map();
+        let remotes = new Set(), lamps = new Map(), localRefs = [], remoteRefs = [];
         if (head.code === 0) {
           const locals = await g(["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
-          const remoteRefs = await g(["for-each-ref", "--format=%(refname:short)", "refs/remotes"]);
+          const remoteRefsRes = await g(["for-each-ref", "--format=%(refname:short)", "refs/remotes"]);
           const localSet = new Set(locals.stdout.split("\n").map((s) => s.trim()).filter(Boolean));
-          remotes = new Set(remoteRefs.stdout.split("\n").map((s) => s.trim()).filter((s) => s && !/\/HEAD$/.test(s)));
+          remotes = new Set(remoteRefsRes.stdout.split("\n").map((s) => s.trim()).filter((s) => s && !/\/HEAD$/.test(s)));
+          localRefs = [...localSet].sort();
+          remoteRefs = [...remotes].sort();
           const log = await g(["log", "HEAD", "--branches", "--remotes", "-n", "120", "--decorate=short",
             "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s%x1e"]);
           if (log.code === 0) for (const rec of log.stdout.split("\x1e")) {
@@ -185,7 +200,7 @@ export default class Git extends View {
               tips.push(name);
             }
             commits.push({ hash, short: short ?? hash.slice(0, 7), author, when, subject: subject ?? "",
-              tags, tips, parents: (parents ?? "").split(" ").filter(Boolean), owner: null });
+              tags, tips, parents: (parents ?? "").split(" ").filter(Boolean), owner: null, reach: new Set() });
           }
           // Each commit takes the lamp of the first branch whose history reaches it:
           // the checked-out branch first, then local branches, then remotes. Shared
@@ -198,12 +213,19 @@ export default class Git extends View {
           if (branch && localSet.has(branch) && tipAt.has(branch)) order.push(branch);
           for (const name of localSet) if (name !== branch && tipAt.has(name)) order.push(name);
           for (const name of remotes) if (tipAt.has(name)) order.push(name);
+          // Every branch walks its whole reachable history, the part an earlier
+          // branch claimed included: `reach` names the branches a commit belongs
+          // to (the branch picker filters by it), `owner` only the first one, for
+          // the lamp. Shared ancestry still reads as the branch it belongs to.
           for (const name of order) {
+            const seen = new Set();
             const stack = [byHash.get(tipAt.get(name))];
             while (stack.length) {
               const i = stack.pop();
-              if (i === undefined || commits[i].owner) continue;
-              commits[i].owner = name;
+              if (i === undefined || seen.has(i)) continue;
+              seen.add(i);
+              commits[i].reach.add(name);
+              if (!commits[i].owner) commits[i].owner = name;
               for (const p of commits[i].parents) { const k = byHash.get(p); if (k !== undefined) stack.push(k); }
             }
           }
@@ -238,7 +260,11 @@ export default class Git extends View {
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.headSha = head.code === 0 ? head.stdout.trim() : null;
         this.branch = branch; this.upstream = upstream; this.ahead = ahead; this.behind = behind;
         this.remotes = remotes; this.lamps = lamps;
+        this.localRefs = localRefs; this.remoteRefs = remoteRefs;
         this.commits = commits;
+        // A picked branch that is gone would leave the filter showing nothing;
+        // drop it instead.
+        for (const name of [...this.picked]) if (!remotes.has(name) && !localRefs.includes(name)) this.picked.delete(name);
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
         this.unstaged = parsed.filter((f) => f.unstaged).map((f) => ({ ...f, ...(workStats[f.path] ?? {}) }));
@@ -314,11 +340,13 @@ export default class Git extends View {
   }
 
   pick(f, staged, cx) {
+    this.branchPick = false;
     this.commitView = null; this.note = null;
     this.openDiff({ mode: staged ? "staged" : "work", path: f.path, untracked: f.untracked, binary: f.binary }, cx);
   }
 
   pickCommit(c, cx) {
+    this.branchPick = false;
     const same = this.commitView?.hash === c.hash;
     this.note = null;
     if (same) { this.commitView = null; cx.notify(); return; }
@@ -408,6 +436,7 @@ export default class Git extends View {
     if (e.key === "escape") {
       if (this.confirmAll || this.confirm) { this.confirmAll = false; this.confirm = null; }
       else if (this.typing) { this.typing = false; this.handle.focus(); }
+      else if (this.branchPick) { this.branchPick = false; }
       else if (this.commitView) { this.commitView = null; }
       else return;
       cx.stop_propagation(); cx.notify();
@@ -464,12 +493,21 @@ export default class Git extends View {
         .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
         .child(icon(name).size(12).text_color(t.accent))
         .when(count > 0, (e) => e.child(div().text_size(11).text_color(t.accent).child(String(count))));
-    return h_flex().h(30).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
-      .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
-      .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+    const picked = this.picked.size, total = this.localRefs.length + this.remoteRefs.length;
+    return h_flex().h(30).flex_none().pl(6).pr(6).gap(4).items_center().border_b(1).border_color(t.border)
+      // The branch itself is the button: one click drops the list of branches.
+      .child(h_flex().id("git-branch-pick").flex_1().min_w(0).h(22).px(5).gap(6).items_center().rounded(6).cursor_pointer()
+        .when(this.branchPick, (e) => e.bg(t.hover))
+        .when(!this.branchPick, (e) => e.hover((s) => s.bg(t.hover)))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.branchPick = !this.branchPick; cx.notify(); })
+        .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
-        .when(Boolean(this.upstream), (e) => e.child(div().flex_none().max_w(170).truncate().text_size(11).text_color(t.dim)
-          .child(`\u2192 ${this.upstream}`))))
+        .when(picked > 0, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.selected).text_size(10).text_color(t.accent)
+          .child(`${picked}/${total}`)))
+        .when(Boolean(this.upstream), (e) => e.child(div().flex_none().max_w(140).truncate().text_size(11).text_color(t.dim)
+          .child(`\u2192 ${this.upstream}`)))
+        .child(icon("chevron-down").size(12).text_color(t.dim)))
       .when(!this.upstream, (e) => e.child(
         h_flex().id("git-publish").h(22).px(8).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -478,6 +516,40 @@ export default class Git extends View {
           .child(div().text_size(11).text_color(t.accent).child("Publish"))))
       .when(this.upstream && this.behind > 0, (e) => e.child(counter("git-pull", "arrow-down", this.behind, (cx) => this.pull(cx))))
       .when(this.upstream && this.ahead > 0, (e) => e.child(counter("git-push", "arrow-up", this.ahead, (cx) => this.push(cx))));
+  }
+
+  // The branch list, dropped from the branch row: every local and remote branch
+  // with its lamp, a click toggles it. Nothing picked means all branches, as
+  // always; picking narrows the history to the commits the picked branches'
+  // histories reach. The branch row, Esc, or a press outside closes it.
+  branchPickView(t) {
+    const picked = this.picked;
+    const row = (name) => {
+      const on = picked.has(name);
+      return h_flex().id(`git-bp-${name}`).h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
+        .when(on, (e) => e.bg(t.selected))
+        .when(!on, (e) => e.hover((s) => s.bg(t.hover)))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); cx.notify(); })
+        .child(div().size(9).flex_none().rounded(5).bg(t[this.lampOf(name)]))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(on ? t.foreground : t.muted).child(name))
+        .when(name === this.branch, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("current")))
+        .when(on, (e) => e.child(icon("check").size(12).text_color(t.accent)));
+    };
+    const label = (text) => div().flex_none().px(8).pt(7).pb(2).text_size(10).font_semibold().text_color(t.dim).child(text);
+    const maxH = Math.max(150, Math.min(380, Math.round((this.size?.height ?? 560) / this.unit) - 110));
+    return v_flex().id("git-branch-pop").absolute().left(6).right(6).top(72).max_h(maxH).flex_none()
+      .rounded(8).bg(t.popover).border_1().border_color(t.input).overflow_y_scrollbar().py(4).text_size(12)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(h_flex().id("git-bp-all").h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
+        .when(picked.size === 0, (e) => e.bg(t.selected))
+        .when(picked.size > 0, (e) => e.hover((s) => s.bg(t.hover)))
+        .on_click((_e, cx) => { picked.clear(); cx.notify(); })
+        .child(icon("git").size(11).text_color(t.muted))
+        .child(div().flex_1().text_size(12).text_color(picked.size ? t.muted : t.foreground).child("All branches"))
+        .when(picked.size === 0, (e) => e.child(icon("check").size(12).text_color(t.accent))))
+      .when(this.localRefs.length > 0, (e) => e.child(label("Local")).children(this.localRefs.map(row)))
+      .when(this.remoteRefs.length > 0, (e) => e.child(label("Remote")).children(this.remoteRefs.map(row)));
   }
 
   commitBox(t) {
@@ -631,24 +703,63 @@ export default class Git extends View {
       .child(div().text_size(12).text_color(t.dim).text_center().child(this.error || (this.loading ? "Loading\u2026" : "No folder")));
   }
 
+  // The Commits pane's top edge, dragged: the log grows as the pointer rises.
+  // `unit` maps the window's pixels to design pixels, measured on the strip.
+  resizeMove(e, cx) {
+    if (!this.resize) return;
+    const maxH = Math.max(80, Math.round((this.size?.height ?? 560) / this.unit) - 250);
+    const next = Math.round(Math.min(maxH, Math.max(72, this.resize.h - (e.position.y - this.resize.startY) / this.unit)));
+    if (next !== this.logHeight) { this.logHeight = next; cx.notify(); }
+  }
+
+  resizeEnd(cx) {
+    if (!this.resize) return;
+    this.resize = null;
+    localStorage.setItem("logHeight", String(this.logHeight));
+    cx.notify();
+  }
+
+  // The commits of the picked branches; while nothing is picked, all of them.
+  shownCommits() {
+    if (!this.picked.size) return this.commits;
+    return this.commits.filter((c) => { for (const name of this.picked) if (c.reach.has(name)) return true; return false; });
+  }
+
+  // The Commits pane. Its top edge is the drag strip: pull it up or down to size
+  // the log (remembered; the strip also measures the window's pixel unit while
+  // it lays out). The count reads "<shown>/<all>" while a branch filter is on.
   historySection(t) {
-    const count = this.commits.length;
+    const commits = this.shownCommits();
+    const filtered = this.picked.size > 0;
     return v_flex().flex_none().border_t(1).border_color(t.border)
+      .when(!this.historyCollapsed, (e) => e.child(
+        div().id("git-log-resize").h(6).flex_none().w_full().cursor_row_resize()
+          .when(this.resize, (s) => s.bg(t.accent))
+          .when(!this.resize, (s) => s.hover((c) => c.bg(t.hover)))
+          .on_size_change((size) => { if (size.height > 0) this.unit = size.height / 6; })
+          .on_mouse_down("left", (ev, cx) => {
+            cx.stop_propagation();
+            this.resize = { startY: ev.position.y, h: this.logHeight };
+          })
+          .on_mouse_move((ev, cx) => this.resizeMove(ev, cx))
+          .on_mouse_up("left", (_ev, cx) => this.resizeEnd(cx))))
       .child(h_flex().h(30).flex_none().pl(8).pr(10).gap(5).items_center()
         .child(div().id("git-log-tog").w(18).h(18).flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.historyCollapsed = !this.historyCollapsed; cx.notify(); })
           .child(icon(this.historyCollapsed ? "chevron-right" : "chevron-down").size(14).text_color(t.muted)))
         .child(div().flex_1().text_size(11.5).font_semibold().text_color(t.muted).child("Commits"))
-        .child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(String(count)))
+        .child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim)
+          .child(filtered ? `${commits.length}/${this.commits.length}` : String(commits.length)))
         .child(div().id("git-reflog").w(18).h(18).flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.refresh(cx); })
           .child(icon("refresh").size(13).text_color(t.dim))))
       .when(!this.historyCollapsed, (e) => e.child(
-        v_flex().id("git-log").h(190).flex_none().py(4).overflow_y_scrollbar()
-          .children(this.commits.map((c) => this.commitRow(t, c)))
-          .when(!count, (e) => e.child(div().p(10).text_size(12).text_color(t.dim).child(this.hasHead ? "No commits" : "No commits yet")))));
+        v_flex().id("git-log").h(this.logHeight).flex_none().py(4).overflow_y_scrollbar()
+          .children(commits.map((c) => this.commitRow(t, c)))
+          .when(!commits.length, (e) => e.child(div().p(10).text_size(12).text_color(t.dim)
+            .child(filtered ? "No commits in the picked branches" : this.hasHead ? "No commits" : "No commits yet")))));
   }
 
   // A commit's message and the names of the files it changed. Choosing a file
@@ -702,10 +813,25 @@ export default class Git extends View {
       .children(list.map((r) => (r.kind === "file" ? this.fileRow(t, r.f, r.staged) : this.sectionRow(t, r))));
     body = this.commitView ? body.flex_none().h(listHeight) : body.flex_1();
 
-    return v_flex().id("git").size_full().min_h(0).rounded(10).overflow_hidden()
+    return v_flex().id("git").size_full().min_h(0).relative().rounded(10).overflow_hidden()
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
+      .on_size_change((size) => { this.size = size; })
+      // Dragging the Commits pane's top edge resizes the log. The strip stops the
+      // press; a press anywhere else, leaving the panel, or a press outside ends a
+      // drag the pointer got away from, so it never resumes without a button held.
+      // A press outside the branch list closes it too (the list stops its own).
+      .on_mouse_down("left", (_e, cx) => {
+        let dirty = false;
+        if (this.resize) { this.resize = null; dirty = true; }
+        if (this.branchPick) { this.branchPick = false; dirty = true; }
+        if (dirty) cx.notify();
+      })
+      .on_mouse_down_out((_e, cx) => { if (this.resize) { this.resize = null; cx.notify(); } })
+      .on_hover((hovered, cx) => { if (!hovered && this.resize) { this.resize = null; cx.notify(); } })
+      .on_mouse_move((e, cx) => this.resizeMove(e, cx))
+      .on_mouse_up("left", (_e, cx) => this.resizeEnd(cx))
       .child(this.header(t))
       .when(Boolean(this.root) && Boolean(this.branch), (e) => e.child(this.branchRow(t)))
       .when(Boolean(this.root), (e) => e.child(this.commitBox(t)))
@@ -714,6 +840,7 @@ export default class Git extends View {
       .when(Boolean(this.root), (e) => e.child(body))
       .when(Boolean(this.root), (e) => e.child(this.historySection(t)))
       .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)))
-      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)));
+      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)))
+      .when(this.branchPick && Boolean(this.root), (e) => e.child(this.branchPickView(t)));
   }
 }
