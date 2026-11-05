@@ -26,6 +26,8 @@ const MAX_LINES = 4000;  // diff lines we turn into rows; the rest is dropped.
 const ROW = 19;          // one row's height.
 const GUT = 46;          // the line-number gutter in a column.
 const NARROW = 420;      // below this width (design px), one column reads better than two.
+const COMPACT = 300;     // below this, the header drops the mode chip and shortens its labels.
+const TINY = 160;        // below this, the header's buttons are icons only, so they are never pushed out.
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const countLines = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
 
@@ -235,11 +237,13 @@ export default class GitDiff extends View {
     cx.notify();
   }
 
+  // An empty label makes the button icon-only: in a very narrow pane a word
+  // would not fit, and an invisible button is worse than a wordless one.
   button(id, label, name, onClick, t, solid) {
     const el = h_flex().id(id).flex_none().h(18).px(7).gap(5).items_center().rounded(5).cursor_pointer().text_size(10.5)
       .on_click(onClick)
       .child(icon(name).size(12))
-      .child(div().child(label));
+      .when(Boolean(label), (e) => e.child(div().child(label)));
     return (solid ? el.bg(t.solid).text_color(t.solid_foreground) : el.bg(t.raised).border_1().border_color(t.border).text_color(t.muted))
       .hover((s) => s.bg(solid ? t.solid : t.hover));
   }
@@ -247,22 +251,29 @@ export default class GitDiff extends View {
   mode(t) { return t.mode === "commit" ? `Commit ${t.commitShort ?? ""}`.trim() : t.mode === "staged" ? "Staged" : "Working Tree"; }
 
   header(t) {
+    // A narrow pane must still show its controls, so the header gives room up in
+    // two steps: the mode chip goes first, then the buttons keep only their icon.
+    // Nothing is ever laid out past the pane's edge (where it would be invisible).
+    const narrow = this.paneW > 0 && this.paneW < COMPACT;
+    const tiny = this.paneW > 0 && this.paneW < TINY;
     if (this.editFile) {
       const discard = this.dirty && this.discard;
+      const back = this.button("git-diff-back", tiny ? "" : discard ? (narrow ? "Discard?" : "Discard changes?") : "Diff", "chevron-left",
+        (_e, cx) => { cx.stop_propagation(); this.back(cx); }, t, false);
+      const save = this.button("git-diff-save", tiny ? "" : this.saving ? "Saving\u2026" : "Save", "disk",
+        (_e, cx) => { cx.stop_propagation(); this.save(cx); }, t, this.dirty);
       return h_flex().h(26).flex_none().px(6).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-        .child(this.button("git-diff-back", discard ? "Discard changes?" : "Diff", "chevron-left",
-          (_e, cx) => { cx.stop_propagation(); this.back(cx); }, t, false))
-        .child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(discard ? t.ansi1 : t.dim)
-          .child(this.dirty ? "Editing \u00b7 modified" : "Editing"))
+        .child(back)
+        .when(!narrow, (e) => e.child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(discard ? t.ansi1 : t.dim)
+          .child(this.dirty ? "Editing \u00b7 modified" : "Editing")))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(this.editFile.path))
-        .child(this.button("git-diff-save", this.saving ? "Saving\u2026" : "Save", "disk",
-          (_e, cx) => { cx.stop_propagation(); this.save(cx); }, t, this.dirty));
+        .child(save);
     }
     const target = this.target;
     return h_flex().h(26).flex_none().px(10).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-      .when(Boolean(target?.path), (e) => e.child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(this.mode(target))))
+      .when(Boolean(target?.path) && !narrow, (e) => e.child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(this.mode(target))))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(target?.path ? t.foreground : t.dim).child(target?.path ?? "Diff"))
-      .when(this.editable(target), (e) => e.child(this.button("git-diff-edit", "Edit", "pencil",
+      .when(this.editable(target), (e) => e.child(this.button("git-diff-edit", tiny ? "" : "Edit", "pencil",
         (_e, cx) => { cx.stop_propagation(); this.startEdit(cx); }, t, false)));
   }
 
