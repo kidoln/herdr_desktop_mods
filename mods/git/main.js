@@ -18,6 +18,8 @@
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane in the main area — side by side, or a single
 // green (new file) / red (deleted file) column when there is no other side to pair.
+// Clicking the file that pane is already showing closes the pane again, so the same
+// click toggles the comparison off.
 // Opening a commit stays blob-free and fast: its message and changed-file names
 // come from the commit's own trees. It follows the focused pane's repository, on this
 // machine or a remote space's. Reads write nothing under .git, so the folder watch
@@ -458,6 +460,20 @@ export default class Git extends View {
     cx.notify();
   }
 
+  // Clicking the file the pane is already showing takes the comparison down again:
+  // the lit row reads as "on", so the same click toggles it off by closing the pane.
+  // Every other file opens or updates it as before.
+  toggleDiff(target, cx) {
+    const shown = this.shownTarget();
+    const same = Boolean(shown) && shown.mode === target.mode && shown.path === target.path
+      && (target.mode !== "commit" || shown.commit === target.commit);
+    if (!same) return false;
+    const pane = this.diffPane(focused()?.tab);
+    if (pane) run("pane.close", { pane: pane.pane });
+    cx.notify();
+    return true;
+  }
+
   // Opening a commit reads only its message and the names of the files it changed —
   // no blob content — so it is fast and works even where the commit's blobs are absent.
   async loadCommit(hash, context) {
@@ -480,8 +496,11 @@ export default class Git extends View {
 
   pick(f, staged, cx) {
     this.branchPick = false;
-    this.commitView = null; this.note = null;
-    this.openDiff({ mode: staged ? "staged" : "work", path: f.path, untracked: f.untracked, binary: f.binary }, cx);
+    this.note = null;
+    const target = { mode: staged ? "staged" : "work", path: f.path, untracked: f.untracked, binary: f.binary };
+    if (this.toggleDiff(target, cx)) return;
+    this.commitView = null;
+    this.openDiff(target, cx);
   }
 
   pickCommit(c, cx) {
@@ -501,7 +520,9 @@ export default class Git extends View {
 
   pickCommitFile(path, cx) {
     if (!this.commitView) return;
-    this.openDiff({ mode: "commit", path, commit: this.commitView.hash, commitShort: this.commitView.short }, cx);
+    const target = { mode: "commit", path, commit: this.commitView.hash, commitShort: this.commitView.short };
+    if (this.toggleDiff(target, cx)) return;
+    this.openDiff(target, cx);
   }
 
   closeCommit(cx) { this.commitView = null; cx.notify(); }
@@ -981,7 +1002,8 @@ export default class Git extends View {
   }
 
   // A commit's message and the names of the files it changed. Choosing a file
-  // hands its diff to the git-diff pane in the main area.
+  // hands its diff to the git-diff pane in the main area; choosing the file that
+  // pane already shows closes it again.
   commitList(t) {
     const c = this.commitView;
     const files = c.files.slice(0, 800);
