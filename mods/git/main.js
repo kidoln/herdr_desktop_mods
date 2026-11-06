@@ -610,6 +610,44 @@ export default class Git extends View {
       .child(div().text_size(10).text_color(t.ansi3).child(tag));
   }
 
+  // The branch names whose last commit this row is: one chip per branch, with
+  // its lamp. A remote borrows its local branch's chip (origin/main reads
+  // "main"); a remote with no local branch on that commit keeps its remote
+  // prefix, so it is not mistaken for a local branch. The current branch's
+  // chip stays strongest; a row with a detached HEAD still shows HEAD.
+  refChips(t, c, isHead) {
+    const chosen = new Map();   // the branch -> the ref to show for it
+    for (const name of c.tips ?? []) {
+      const key = this.colorOf(name);
+      const cur = chosen.get(key);
+      if (!cur || this.betterRef(name, cur)) chosen.set(key, name);
+    }
+    const current = this.branch && this.branch !== "HEAD" ? this.branch : null;
+    const names = [...chosen.values()];
+    names.sort((a, b) => this.refRank(a) - this.refRank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    const chips = names.map((name) => this.refChip(t, name, name === current));
+    if (isHead && current && !names.includes(current)) chips.unshift(this.refChip(t, current, true));
+    else if (isHead && !current) chips.unshift(this.refChip(t, "HEAD", true));
+    return chips;
+  }
+
+  // The order the chips read in: the current branch, then locals, then remotes.
+  refRank(name) { return name === this.branch ? 0 : this.remotes?.has(name) ? 2 : 1; }
+
+  // Between two refs on the same branch: the local one wins, else origin's.
+  betterRef(a, b) {
+    const remote = (n) => Boolean(this.remotes?.has(n));
+    if (remote(a) !== remote(b)) return !remote(a);
+    if (remote(a) && a.startsWith("origin/") !== b.startsWith("origin/")) return a.startsWith("origin/");
+    return false;
+  }
+
+  refChip(t, name, current) {
+    return h_flex().flex_none().gap(4).px(5).py(1).rounded(4).bg(t.raised).items_center()
+      .child(div().size(6).flex_none().rounded(3).bg(t[this.lampOf(name)]))
+      .child(div().max_w(150).truncate().text_size(10).text_color(current ? t.foreground : t.muted).child(name));
+  }
+
   header(t) {
     const repo = this.root ? this.root.split(/[\\/]/).pop() : null;
     const busy = this.busy || this.loading;
@@ -864,7 +902,7 @@ export default class Git extends View {
       .child(this.gutter(t, g))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
       .children(c.tags.map((tag) => this.tagChip(t, tag)))
-      .when(isHead, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(this.branch ?? "HEAD")))
+      .children(this.refChips(t, c, isHead))
       .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? ""));
   }
 
