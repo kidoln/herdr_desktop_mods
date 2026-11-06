@@ -20,7 +20,7 @@
 // stays quiet.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Popup } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
 function location() {
@@ -494,20 +494,25 @@ export default class Git extends View {
         .child(icon(name).size(12).text_color(t.accent))
         .when(count > 0, (e) => e.child(div().text_size(11).text_color(t.accent).child(String(count))));
     const picked = this.picked.size, total = this.localRefs.length + this.remoteRefs.length;
+    // The branch itself is the button of the branch list: one press drops the
+    // list under it. `Popup` paints the content in a layer anchored to this
+    // trigger, above the rest of the panel, so nothing below it moves; this
+    // script owns the press and the dismissal (Esc, a press elsewhere).
+    const trigger = h_flex().id("git-branch-pick").flex_1().min_w(0).h(22).px(5).gap(6).items_center().rounded(6).cursor_pointer()
+      .when(this.branchPick, (e) => e.bg(t.hover))
+      .when(!this.branchPick, (e) => e.hover((s) => s.bg(t.hover)))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.branchPick = !this.branchPick; cx.notify(); })
+      .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
+      .when(picked > 0, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.selected).text_size(10).text_color(t.accent)
+        .child(`${picked}/${total}`)))
+      .when(Boolean(this.upstream), (e) => e.child(div().flex_none().max_w(140).truncate().text_size(11).text_color(t.dim)
+        .child(`\u2192 ${this.upstream}`)))
+      .child(icon("chevron-down").size(12).text_color(t.dim));
     return h_flex().h(30).flex_none().pl(6).pr(6).gap(4).items_center().border_b(1).border_color(t.border)
-      // The branch itself is the button: one click drops the list of branches.
-      .child(h_flex().id("git-branch-pick").flex_1().min_w(0).h(22).px(5).gap(6).items_center().rounded(6).cursor_pointer()
-        .when(this.branchPick, (e) => e.bg(t.hover))
-        .when(!this.branchPick, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); this.branchPick = !this.branchPick; cx.notify(); })
-        .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
-        .when(picked > 0, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.selected).text_size(10).text_color(t.accent)
-          .child(`${picked}/${total}`)))
-        .when(Boolean(this.upstream), (e) => e.child(div().flex_none().max_w(140).truncate().text_size(11).text_color(t.dim)
-          .child(`\u2192 ${this.upstream}`)))
-        .child(icon("chevron-down").size(12).text_color(t.dim)))
+      .child(Popup.new("git-branch-pop", trigger).anchor("top_left")
+        .when(this.branchPick, (e) => e.content(this.branchPickView(t))))
       .when(!this.upstream, (e) => e.child(
         h_flex().id("git-publish").h(22).px(8).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -518,10 +523,11 @@ export default class Git extends View {
       .when(this.upstream && this.ahead > 0, (e) => e.child(counter("git-push", "arrow-up", this.ahead, (cx) => this.push(cx))));
   }
 
-  // The branch list, dropped from the branch row: every local and remote branch
-  // with its lamp, a click toggles it. Nothing picked means all branches, as
-  // always; picking narrows the history to the commits the picked branches'
-  // histories reach. The branch row, Esc, or a press outside closes it.
+  // The branch list itself: the Popup's content under the branch row. Every
+  // local and remote branch with its lamp, a click toggles it. Nothing picked
+  // means all branches, as always; picking narrows the history to the commits
+  // the picked branches' histories reach. The surface closes on a press
+  // outside, a press on the trigger, or Escape.
   branchPickView(t) {
     const picked = this.picked;
     const row = (name) => {
@@ -538,7 +544,8 @@ export default class Git extends View {
     };
     const label = (text) => div().flex_none().px(8).pt(7).pb(2).text_size(10).font_semibold().text_color(t.dim).child(text);
     const maxH = Math.max(150, Math.min(380, Math.round((this.size?.height ?? 560) / this.unit) - 110));
-    return v_flex().id("git-branch-pop").absolute().left(6).right(6).top(72).max_h(maxH).flex_none()
+    const width = Math.max(240, Math.round((this.size?.width ?? 720) / this.unit) - 12);
+    return v_flex().id("git-branch-pop-list").w(width).max_h(maxH).flex_none()
       .rounded(8).bg(t.popover).border_1().border_color(t.input).overflow_y_scrollbar().py(4).text_size(12)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(h_flex().id("git-bp-all").h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
@@ -828,7 +835,12 @@ export default class Git extends View {
         if (this.branchPick) { this.branchPick = false; dirty = true; }
         if (dirty) cx.notify();
       })
-      .on_mouse_down_out((_e, cx) => { if (this.resize) { this.resize = null; cx.notify(); } })
+      .on_mouse_down_out((_e, cx) => {
+        let dirty = false;
+        if (this.resize) { this.resize = null; dirty = true; }
+        if (this.branchPick) { this.branchPick = false; dirty = true; }
+        if (dirty) cx.notify();
+      })
       .on_hover((hovered, cx) => { if (!hovered && this.resize) { this.resize = null; cx.notify(); } })
       .on_mouse_move((e, cx) => this.resizeMove(e, cx))
       .on_mouse_up("left", (_e, cx) => this.resizeEnd(cx))
@@ -840,7 +852,6 @@ export default class Git extends View {
       .when(Boolean(this.root), (e) => e.child(body))
       .when(Boolean(this.root), (e) => e.child(this.historySection(t)))
       .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)))
-      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)))
-      .when(this.branchPick && Boolean(this.root), (e) => e.child(this.branchPickView(t)));
+      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)));
   }
 }
