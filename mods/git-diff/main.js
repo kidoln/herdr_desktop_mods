@@ -3,8 +3,10 @@
 // pane shows it side by side — removed and added lines in two aligned columns (old
 // left, new right), a removed line and the added line that replaces it sharing a
 // row. A narrow pane folds the same rows into one unified column (removals, then
-// additions), so lines are never squeezed. Hunk headers and file metadata span the
-// full width in both.
+// additions), so lines are never squeezed. A file with nothing to pair against — a
+// new file (no old side) or a deleted one (no new side) — always gets that one
+// column, full width, every code row green for the addition or red for the removal.
+// Hunk headers and file metadata span the full width in both.
 //
 // For a live file on this machine (not a commit's old version, not a binary), the
 // header carries an Edit button: the pane turns into an editor for the file, with
@@ -106,7 +108,8 @@ async function loadRows(target) {
     if (text === null) return buildRows(["Cannot preview this file (binary, too large, or unreadable)"]);
     if (text.includes("\0")) return buildRows(["Binary file \u00b7 no text diff"]);
     const n = countLines(text);
-    return buildRows([`@@ -0,0 +1,${n} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, MAX_LINES).map((l) => `+${l}`)]);
+    // Untracked: the worktree copy is the whole story, so every line is an addition.
+    return { ...buildRows([`@@ -0,0 +1,${n} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, MAX_LINES).map((l) => `+${l}`)]), kind: "added" };
   }
   const args = mode === "commit"
     ? ["show", "--no-color", "--no-ext-diff", "--no-textconv", target.commit, "--", path]
@@ -117,7 +120,13 @@ async function loadRows(target) {
   const hunk = all.findIndex((l) => l.startsWith("@@"));
   if (!out.trim() || hunk < 0) return buildRows([target.binary ? "Binary file changed" : "No text diff"]);
   // Keep the file's banner (diff --git / index / --- / +++), drop any commit header.
-  return buildRows((start >= 0 ? all.slice(start) : all.slice(hunk)).slice(0, MAX_LINES));
+  const lines = (start >= 0 ? all.slice(start) : all.slice(hunk)).slice(0, MAX_LINES);
+  // git says so itself when there is no old version (a new file) or no new one (a
+  // deleted file). Such a diff has no second side to align, so the pane shows it in
+  // one column whatever its width — every code row green (addition) or red (removal).
+  const kind = lines.some((l) => l.startsWith("new file mode ")) ? "added"
+    : lines.some((l) => l.startsWith("deleted file mode ")) ? "deleted" : "mixed";
+  return { ...buildRows(lines), kind };
 }
 
 export default class GitDiff extends View {
@@ -126,6 +135,7 @@ export default class GitDiff extends View {
     this.target = null;
     this.rows = [];   // paired rows, for the two-column view
     this.uni = [];    // the same lines in unified order, for the one-column view
+    this.kind = "mixed"; // "added" / "deleted": always one column (nothing to pair)
     this.paneW = 0;   // the pane's width in design px (zoom-independent)
     this.loading = false; this.error = null;
     this.loadToken = 0;                 // guards a stale fetch after a save reloads it
@@ -146,7 +156,7 @@ export default class GitDiff extends View {
     if (seq === this.seq) return;
     this.seq = seq;
     this.target = target ?? null;
-    this.rows = []; this.uni = []; this.error = null;
+    this.rows = []; this.uni = []; this.kind = "mixed"; this.error = null;
     // Another file was picked: leave the editor when nothing would be lost, and
     // keep it (and its unsaved text) when there is.
     if (this.editFile && !this.dirty && (target?.root !== this.editFile.root || target?.path !== this.editFile.path)) this.leave();
@@ -166,6 +176,7 @@ export default class GitDiff extends View {
       if (this.loadToken !== token) return;
       this.rows = rows?.side ?? [];
       this.uni = rows?.uni ?? [];
+      this.kind = rows?.kind ?? "mixed";
       this.error = error; this.loading = false;
       cx.notify();
     });
@@ -320,9 +331,11 @@ export default class GitDiff extends View {
   render(cx) {
     this.sync(cx);
     const t = theme();
-    // Two columns need room for a gutter and readable text in each; below that the
-    // same lines fold into one unified column instead of squeezing both.
-    const list = this.paneW > 0 && this.paneW < NARROW ? this.uni : this.rows;
+    // A new or deleted file has no other side to align against, so it stays one
+    // column whatever the width. For everything else two columns need room for a
+    // gutter and readable text in each; below that the same lines fold into one
+    // unified column instead of squeezing both.
+    const list = this.kind !== "mixed" || (this.paneW > 0 && this.paneW < NARROW) ? this.uni : this.rows;
     return v_flex().id("git-diff").size_full().min_h(0).overflow_hidden()
       .on_size_change((size, cx) => {
         const w = size.width / settings().zoom;

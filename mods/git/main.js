@@ -16,8 +16,9 @@
 // edge drags to size it, and the size is remembered.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
-// the comparison to the `git-diff` pane, which shows it side by side in the main
-// area. Opening a commit stays blob-free and fast: its message and changed-file names
+// the comparison to the `git-diff` pane in the main area — side by side, or a single
+// green (new file) / red (deleted file) column when there is no other side to pair.
+// Opening a commit stays blob-free and fast: its message and changed-file names
 // come from the commit's own trees. It follows the focused pane's repository, on this
 // machine or a remote space's. Reads write nothing under .git, so the folder watch
 // stays quiet.
@@ -980,7 +981,7 @@ export default class Git extends View {
   }
 
   // A commit's message and the names of the files it changed. Choosing a file
-  // hands its diff to the git-diff pane in the main area, side by side.
+  // hands its diff to the git-diff pane in the main area.
   commitList(t) {
     const c = this.commitView;
     const files = c.files.slice(0, 800);
