@@ -85,11 +85,15 @@ function numstat(out) {
 // curve, so a merge leaves its dot as a line that bends out and down; a line
 // another line got to first (a side branch rejoining the trunk) bends into that
 // dot with the same curve, the fork the picture reads as a parent with two
-// children above it. Lines carry the lamp of the branch they belong to: the
-// tip nearest the line's commits, walked down the parents. The geometry is
-// plain commands, so it can be exercised without a window; the row view turns
-// each into a stroke path. Design pixels: a row is 24 tall (see commitRow),
-// lanes are 14 apart, and the curves have radius 7.
+// children above it. Lines carry the lamp of the branch they belong to -- the
+// tip nearest the line's commits, walked down the parents -- and a line hands
+// its lamp over at a branch's tip: dev's commits running into main's tip stay
+// dev's above it, and main's lamp takes the tip and the shared history below.
+// Only a branch's newest tip in the window hands over, so a stale remote
+// pointing into old shared history does not repaint it. The geometry is plain
+// commands, so it can be exercised without a window; the row view turns each
+// into a stroke path. Design pixels: a row is 24 tall (see commitRow), lanes
+// are 14 apart, and the curves have radius 7.
 const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 1.25 };
 const KAPPA = 0.5523;
 
@@ -105,6 +109,22 @@ function graphRows(commits, tipName, lampOf) {
   for (let h = 0; h < q.length; h++) for (const ph of commits[q[h]].parents) {
     const j = pos.get(ph);
     if (j !== undefined && near[j] === null) { near[j] = near[q[h]]; q.push(j); }
+  }
+  // Where a line hands its lamp over: a commit that is a branch's tip. The
+  // line running into it keeps its own lamp above the dot, the dot and the
+  // history below take the tip's branch's lamp. Only a branch's newest tip in
+  // the window hands over: a stale remote pointing into old shared history
+  // (gientech/feature_dev behind feature_dev's own tip) does not repaint it.
+  const claim = new Map();
+  {
+    const newest = new Map();   // lamp -> the topmost row carrying it
+    for (let i = 0; i < commits.length; i++) {
+      const t = tipName(commits[i]);
+      if (!t) continue;
+      const lamp = lampOf(t);
+      if (!newest.has(lamp) || i < newest.get(lamp)) newest.set(lamp, i);
+    }
+    for (const [lamp, i] of newest) claim.set(i, lamp);
   }
   const X = (l) => GRAPH.x0 + l * GRAPH.pitch;
   const rows = commits.map(() => []);
@@ -125,7 +145,8 @@ function graphRows(commits, tipName, lampOf) {
     }
     lanes[i] = lc; if (lc > maxLane) maxLane = lc;
     const own = near[i] ? lampOf(near[i]) : (c.owner ? lampOf(c.owner) : "dim");
-    const color = waiting.length ? active[lc].color : own;
+    const incoming = waiting.length ? active[lc].color : own;
+    const color = claim.get(i) ?? incoming;
     colors[i] = color;
     // What is already on the way: a line whose commit is this one bends into
     // the dot (the dot's own line just runs into it); the rest run through.
@@ -141,7 +162,7 @@ function graphRows(commits, tipName, lampOf) {
         vert(i, l, 0, 24, a.color);
       }
     }
-    if (waiting.length) vert(i, lc, 0, 12, color);
+    if (waiting.length) vert(i, lc, 0, 12, incoming);
     // The first parent runs on in this line; with no parent under the window
     // the line trails off. Other parents open new lines to the right, each in
     // the lamp of the branch it belongs to.
