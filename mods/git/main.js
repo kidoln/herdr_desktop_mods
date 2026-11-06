@@ -90,7 +90,7 @@ function numstat(out) {
 // plain commands, so it can be exercised without a window; the row view turns
 // each into a stroke path. Design pixels: a row is 24 tall (see commitRow),
 // lanes are 14 apart, and the curves have radius 7.
-const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 2 };
+const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 1.25 };
 const KAPPA = 0.5523;
 
 // `tipName(c)` names the branch tip on a commit (the branch that colors it; a
