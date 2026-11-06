@@ -20,6 +20,10 @@
 // green (new file) / red (deleted file) column when there is no other side to pair.
 // Clicking the file that pane is already showing closes the pane again, so the same
 // click toggles the comparison off.
+// Clicking a commit does not push a detail panel under the list either: its message
+// and changed-file list open as an anchored surface right under that row, floating
+// over the commits below it. The same click toggles it off; so do Escape and a press
+// elsewhere in the panel.
 // Opening a commit stays blob-free and fast: its message and changed-file names
 // come from the commit's own trees. It follows the focused pane's repository, on this
 // machine or a remote space's. Reads write nothing under .git, so the folder watch
@@ -406,6 +410,7 @@ export default class Git extends View {
         // A picked branch that is gone would leave the filter showing nothing;
         // drop it instead.
         for (const name of [...this.picked]) if (!remotes.has(name) && !localRefs.includes(name)) this.picked.delete(name);
+        this.syncCommitView();
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
         this.unstaged = parsed.filter((f) => f.unstaged).map((f) => ({ ...f, ...(workStats[f.path] ?? {}) }));
@@ -700,7 +705,9 @@ export default class Git extends View {
       .when(this.branchPick, (e) => e.bg(t.hover))
       .when(!this.branchPick, (e) => e.hover((s) => s.bg(t.hover)))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.branchPick = !this.branchPick; cx.notify(); })
+      // Opening the branch list takes the commit popup down: only one anchored
+      // surface at a time (a commit click closes the branch list the same way).
+      .on_click((_e, cx) => { cx.stop_propagation(); this.branchPick = !this.branchPick; if (this.branchPick) this.commitView = null; cx.notify(); })
       .child(icon("branch").size(13).text_color(t[this.lampOf(this.branch)]))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(this.branch))
       .when(picked > 0, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.selected).text_size(10).text_color(t.accent)
@@ -734,7 +741,7 @@ export default class Git extends View {
         .when(on, (e) => e.bg(t.selected))
         .when(!on, (e) => e.hover((s) => s.bg(t.hover)))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); this._graph = null; cx.notify(); })
+        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); this._graph = null; this.syncCommitView(); cx.notify(); })
         .child(div().size(9).flex_none().rounded(5).bg(t[this.lampOf(name)]))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(on ? t.foreground : t.muted).child(name))
         .when(name === this.branch, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("current")))
@@ -749,7 +756,7 @@ export default class Git extends View {
       .child(h_flex().id("git-bp-all").h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .when(picked.size === 0, (e) => e.bg(t.selected))
         .when(picked.size > 0, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => { picked.clear(); this._graph = null; cx.notify(); })
+        .on_click((_e, cx) => { picked.clear(); this._graph = null; this.syncCommitView(); cx.notify(); })
         .child(icon("git").size(11).text_color(t.muted))
         .child(div().flex_1().text_size(12).text_color(picked.size ? t.muted : t.foreground).child("All branches"))
         .when(picked.size === 0, (e) => e.child(icon("check").size(12).text_color(t.accent))))
@@ -916,9 +923,12 @@ export default class Git extends View {
   commitRow(t, c, g) {
     const open = this.commitView?.hash === c.hash;
     const isHead = c.hash === this.headSha;
-    return h_flex().id(`git-c-${c.hash}`).h(24).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
+    const row = h_flex().id(`git-c-${c.hash}`).h(24).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
       .when(open, (e) => e.bg(t.selected))
       .when(!open, (e) => e.hover((s) => s.bg(t.hover)))
+      // The press belongs to the row: a press anywhere else in the panel takes the
+      // commit popup down, and the open row must read its own click as the toggle.
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => this.pickCommit(c, cx))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.commitMenu(t, c); })
       .child(this.gutter(t, g))
@@ -926,6 +936,10 @@ export default class Git extends View {
       .children(c.tags.map((tag) => this.tagChip(t, tag)))
       .children(this.refChips(t, c, isHead))
       .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? ""));
+    // A picked commit's details float under its own row instead of a panel below
+    // the list: the row stays where it is, and the surface opens over what follows.
+    return Popup.new(`git-commit-pop-${c.hash}`, row).anchor("top_left")
+      .when(open, (e) => e.content(this.commitPopup(t)));
   }
 
   confirmAllBar(t) {
@@ -961,6 +975,13 @@ export default class Git extends View {
   shownCommits() {
     if (!this.picked.size) return this.commits;
     return this.commits.filter((c) => { for (const name of this.picked) if (c.reach.has(name)) return true; return false; });
+  }
+
+  // The commit popup belongs to its row: a branch filter or a refresh that takes
+  // the row out of the shown list takes the popup down with it.
+  syncCommitView() {
+    const c = this.commitView;
+    if (c && !this.shownCommits().some((x) => x.hash === c.hash)) this.commitView = null;
   }
 
   // The Commits pane. Its top edge is the drag strip: pull it up or down to size
@@ -1001,27 +1022,37 @@ export default class Git extends View {
             .child(filtered ? "No commits in the picked branches" : this.hasHead ? "No commits" : "No commits yet")))));
   }
 
-  // A commit's message and the names of the files it changed. Choosing a file
-  // hands its diff to the git-diff pane in the main area; choosing the file that
-  // pane already shows closes it again.
-  commitList(t) {
+  // The surface a picked commit opens under its row: its message and the names
+  // of the files it changed. Choosing a file hands its diff to the git-diff pane
+  // in the main area; choosing the file that pane already shows closes it again.
+  commitPopup(t) {
     const c = this.commitView;
     const files = c.files.slice(0, 800);
     const target = this.shownTarget();
     const isShown = (path) => Boolean(target) && target.mode === "commit" && target.commit === c.hash && target.path === path;
-    return v_flex().flex_1().min_h(0).border_t(1).border_color(t.border)
-      .child(h_flex().h(30).flex_none().pl(12).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
+    // The panel's own width and height, in design pixels (see `unit`), so the
+    // surface reads as a widening of the row: never wider than the panel, never
+    // taller than what fits above its bottom edge. The body caps its own height
+    // rather than flexing: the surface is sized by its content, so a flex-1
+    // child would contribute nothing and collapse.
+    const width = Math.max(240, Math.round((this.size?.width ?? 720) / this.unit) - 20);
+    const maxH = Math.max(160, Math.min(400, Math.round((this.size?.height ?? 560) / this.unit) - 110));
+    return v_flex().id("git-commit-pop").w(width).max_h(maxH).flex_none().rounded(8).bg(t.popover)
+      .border_1().border_color(t.input).overflow_hidden()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(h_flex().h(30).flex_none().pl(10).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("Commit"))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).font_family(MONO()).child(`${c.short} ${c.subject}`))
-        .child(div().id("git-commit-close").w(20).h(20).flex().items_center().justify_center().rounded(5).cursor_pointer()
+        .child(div().id("git-commit-close").w(20).h(20).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.closeCommit(cx); })
           .child(icon("close").size(13).text_color(t.dim))))
-      .child(v_flex().id("git-commit-body").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(3)
+      .child(v_flex().id("git-commit-body").max_h(maxH - 30).flex_none().overflow_y_scrollbar().p(10).gap(3)
         .child(div().text_size(12).font_semibold().text_color(t.foreground).child(c.subject || "(no subject)"))
         .when(Boolean(c.body), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(c.body.slice(0, 4000))))
         .child(div().h(4).flex_none())
-        .when(!files.length, (e) => e.child(div().text_size(12).text_color(t.dim).child("No file changes")))
+        .when(!c.loaded, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading\u2026")))
+        .when(c.loaded && !files.length, (e) => e.child(div().text_size(12).text_color(t.dim).child("No file changes")))
         .children(files.map((f) =>
           h_flex().id(`git-cf-${f.path}`).h(26).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
             .when(isShown(f.path), (e) => e.bg(t.selected))
@@ -1046,12 +1077,8 @@ export default class Git extends View {
     if (!this.collapsed.changes) for (const f of this.unstaged) list.push({ key: `w:${f.path}`, kind: "file", f, staged: false });
     if (!this.staged.length && !this.unstaged.length) list.push({ key: "empty", kind: "empty" });
 
-    const rowHeight = list.reduce((n, r) => n + (r.kind === "section" ? 28 : 26), 0);
-    const listHeight = Math.min(320, Math.max(60, rowHeight + 12));
-
-    let body = v_flex().id("git-list").w_full().min_h(0).py(4).overflow_y_scrollbar()
+    const body = v_flex().id("git-list").w_full().flex_1().min_h(0).py(4).overflow_y_scrollbar()
       .children(list.map((r) => (r.kind === "file" ? this.fileRow(t, r.f, r.staged) : this.sectionRow(t, r))));
-    body = this.commitView ? body.flex_none().h(listHeight) : body.flex_1();
 
     return v_flex().id("git").size_full().min_h(0).relative().rounded(10).overflow_hidden()
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
@@ -1061,17 +1088,20 @@ export default class Git extends View {
       // Dragging the Commits pane's top edge resizes the log. The strip stops the
       // press; a press anywhere else, leaving the panel, or a press outside ends a
       // drag the pointer got away from, so it never resumes without a button held.
-      // A press outside the branch list closes it too (the list stops its own).
+      // A press outside the branch list or the commit popup closes it too (each
+      // surface stops its own presses).
       .on_mouse_down("left", (_e, cx) => {
         let dirty = false;
         if (this.resize) { this.resize = null; dirty = true; }
         if (this.branchPick) { this.branchPick = false; dirty = true; }
+        if (this.commitView) { this.commitView = null; dirty = true; }
         if (dirty) cx.notify();
       })
       .on_mouse_down_out((_e, cx) => {
         let dirty = false;
         if (this.resize) { this.resize = null; dirty = true; }
         if (this.branchPick) { this.branchPick = false; dirty = true; }
+        if (this.commitView) { this.commitView = null; dirty = true; }
         if (dirty) cx.notify();
       })
       .on_hover((hovered, cx) => { if (!hovered && this.resize) { this.resize = null; cx.notify(); } })
@@ -1084,7 +1114,6 @@ export default class Git extends View {
       .when(!this.root, (e) => e.child(this.emptyState(t)))
       .when(Boolean(this.root), (e) => e.child(body))
       .when(Boolean(this.root), (e) => e.child(this.historySection(t)))
-      .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)))
-      .when(Boolean(this.commitView), (e) => e.child(this.commitList(t)));
+      .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)));
   }
 }
