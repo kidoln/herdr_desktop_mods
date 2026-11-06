@@ -12,8 +12,13 @@
 // drops the list of every branch: pick one or more and the history narrows to
 // the commits their histories reach (nothing picked: all). Right-clicking a
 // commit opens a small menu at the pointer whose Copy Hash puts the full SHA
-// on the clipboard -- the row itself shows no hash. The Commits pane's top
-// edge drags to size it, and the size is remembered.
+// on the clipboard -- the row itself shows no hash. A row's own business is
+// its subject: the message keeps its share of the width and the tag and branch
+// chips are cut to what is left of the row, the rest reading as one "+N" pill,
+// so a long tag name can never squeeze the message out. Resting the pointer on
+// a commit opens the whole row above it -- the subject on the first line with
+// the date, every tag and branch under that, nothing shortened. The Commits
+// pane's top edge drags to size it, and the size is remembered.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane in the main area — side by side, or a single
@@ -23,14 +28,17 @@
 // Clicking a commit does not push a detail panel under the list either: its message
 // and changed-file list open as an anchored surface right under that row, floating
 // over the commits below it. The same click toggles it off; so do Escape and a press
-// elsewhere in the panel.
+// elsewhere in the panel. The surface's header carries the short hash -- the message
+// stays the body's, shown once -- with a button that copies the full SHA. Right-clicking
+// a commit takes the surface down before its context menu opens, so the two never stand
+// over the list together.
 // Opening a commit stays blob-free and fast: its message and changed-file names
 // come from the commit's own trees. It follows the focused pane's repository, on this
 // machine or a remote space's. Reads write nothing under .git, so the folder watch
 // stays quiet.
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Popup } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Popup, HoverCard } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
 function location() {
@@ -631,18 +639,20 @@ export default class Git extends View {
       .child(label);
   }
 
-  tagChip(t, tag) {
+  // A tag chip. `maxText` caps the label, in design pixels, where the chip has
+  // to share the row; null leaves the whole name (the hover card's copy).
+  tagChip(t, tag, maxText) {
     return h_flex().flex_none().gap(3).px(5).py(1).rounded(4).bg(t.ansi3 + "22").items_center()
       .child(icon("tag").size(10).text_color(t.ansi3))
-      .child(div().text_size(10).text_color(t.ansi3).child(tag));
+      .child(div().when(maxText !== null, (e) => e.max_w(maxText).truncate()).text_size(10).text_color(t.ansi3).child(tag));
   }
 
-  // The branch names whose last commit this row is: one chip per branch, with
-  // its lamp. A remote borrows its local branch's chip (origin/main reads
-  // "main"); a remote with no local branch on that commit keeps its remote
-  // prefix, so it is not mistaken for a local branch. The current branch's
-  // chip stays strongest; a row with a detached HEAD still shows HEAD.
-  refChips(t, c, isHead) {
+  // The branch names whose last commit this row is, in the order their chips
+  // read: the current branch, then locals, then remotes. A remote borrows its
+  // local branch's spot (origin/main reads "main"); a remote with no local
+  // branch on that commit keeps its remote prefix, so it is not mistaken for a
+  // local branch. A row that is HEAD still shows HEAD, detached or not.
+  refNames(c, isHead) {
     const chosen = new Map();   // the branch -> the ref to show for it
     for (const name of c.tips ?? []) {
       const key = this.colorOf(name);
@@ -652,10 +662,27 @@ export default class Git extends View {
     const current = this.branch && this.branch !== "HEAD" ? this.branch : null;
     const names = [...chosen.values()];
     names.sort((a, b) => this.refRank(a) - this.refRank(b) || (a < b ? -1 : a > b ? 1 : 0));
-    const chips = names.map((name) => this.refChip(t, name, name === current));
-    if (isHead && current && !names.includes(current)) chips.unshift(this.refChip(t, current, true));
-    else if (isHead && !current) chips.unshift(this.refChip(t, "HEAD", true));
-    return chips;
+    if (isHead && current && !names.includes(current)) names.unshift(current);
+    else if (isHead && !current) names.unshift("HEAD");
+    return names;
+  }
+
+  // Everything a commit's chips would read if the row had room, in the order
+  // they show: the tags on the commit, then the branches whose tip it is. One
+  // list feeds both the row (rowChips cuts it to fit) and the hover card (the
+  // whole of it, commitTip).
+  chipSpecs(c, isHead) {
+    const current = this.branch && this.branch !== "HEAD" ? this.branch : null;
+    const isCurrent = (name) => name === current || (name === "HEAD" && !current);
+    return [
+      ...(c.tags ?? []).map((text) => ({ kind: "tag", text })),
+      ...this.refNames(c, isHead).map((text) => ({ kind: "ref", text, current: isCurrent(text) })),
+    ];
+  }
+
+  // One chip of a spec: the tag chip, or the branch chip with its lamp.
+  chipOf(t, spec, maxText) {
+    return spec.kind === "tag" ? this.tagChip(t, spec.text, maxText) : this.refChip(t, spec.text, spec.current, maxText);
   }
 
   // The order the chips read in: the current branch, then locals, then remotes.
@@ -669,10 +696,74 @@ export default class Git extends View {
     return false;
   }
 
-  refChip(t, name, current) {
+  refChip(t, name, current, maxText) {
     return h_flex().flex_none().gap(4).px(5).py(1).rounded(4).bg(t.raised).items_center()
       .child(div().size(6).flex_none().rounded(3).bg(t[this.lampOf(name)]))
-      .child(div().max_w(150).truncate().text_size(10).text_color(current ? t.foreground : t.muted).child(name));
+      .child(div().when(maxText !== null, (e) => e.max_w(maxText).truncate()).text_size(10).text_color(current ? t.foreground : t.muted).child(name));
+  }
+
+  // Roughly how wide a string draws at `size` design pixels: wide glyphs (CJK,
+  // emoji) take about a full em, the rest about half. Only ever a way to pick
+  // what to show before the layout measures -- being a little off costs a chip.
+  textWidth(text, size) {
+    let w = 0;
+    for (const ch of String(text ?? "")) w += (ch.codePointAt(0) > 0x2e7f ? 1.06 : 0.58) * size;
+    return w;
+  }
+
+  // Roughly how wide a chip draws: what its box adds to the label (padding, the
+  // icon or dot, the gap), plus the label at its 10 px size, capped at `maxText`
+  // with room for the ellipsis a truncating label draws.
+  chipWidth(spec, maxText) {
+    const raw = this.textWidth(spec.text, 10);
+    return (spec.kind === "tag" ? 23 : 20) + Math.min(raw, maxText) + (raw > maxText ? 8 : 0);
+  }
+
+  // The design-pixel share of one row the chips may take: the row's width less
+  // its own chrome (panel border and padding, the graph lane, the date, the
+  // gaps) and less the subject's share of what remains -- a long message
+  // shortens its chips, never the other way around. The floor keeps one chip
+  // visible on a narrow panel; the ceiling keeps the chips chips on a wide one.
+  chipBudget(g) {
+    const width = (this.size?.width ?? 720) / (this.unit || 1);
+    const free = width - 34 - g.width - 68 - 28;
+    const keep = Math.max(110, free * 0.4);
+    return Math.max(50, Math.min(340, Math.round(free - keep)));
+  }
+
+  // The row's tag and branch chips, cut where the row runs out of room: what
+  // fits the budget shows and the rest reads as one "+N" pill. A chip that
+  // cannot fit whole still shows what the budget can hold rather than nothing,
+  // so a row with tags never hides them all; the hover card has the whole set.
+  rowChips(t, c, isHead, g) {
+    const specs = this.chipSpecs(c, isHead);
+    if (!specs.length) return [];
+    const budget = this.chipBudget(g), cap = 150, pill = 30;
+    const widths = specs.map((spec) => this.chipWidth(spec, cap) + 7);   // 7: the gap between chips
+    let shown = 0, used = 0;
+    while (shown < specs.length && used + widths[shown] <= budget) { used += widths[shown]; shown += 1; }
+    // The "+N" pill needs room as well: one chip fewer beats a count of chips
+    // with no chip to count from.
+    if (shown < specs.length && shown > 0 && used + pill > budget) shown -= 1;
+    const chips = specs.slice(0, shown).map((spec) => this.chipOf(t, spec, cap));
+    if (shown < specs.length) {
+      if (!shown) {
+        // Nothing fits whole: the first chip reads as much of its label as the
+        // budget has room for (the card has the rest of it).
+        const room = specs.length > 1 ? pill : 0;   // a "+N" pill only when one follows
+        const chrome = specs[0].kind === "tag" ? 23 : 20;
+        chips.push(this.chipOf(t, specs[0], Math.max(16, budget - room - chrome - 6)));
+        shown = 1;
+      }
+      // The pill counts what the row is not showing; with the single chip above
+      // having taken the first spec, there may be nothing left to count.
+      if (shown < specs.length) chips.push(
+        h_flex().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim)
+          .child(`+${specs.length - shown}`));
+    }
+    // The box is capped at the budget and clips: were the estimates above
+    // generous, the row would still keep the subject its share.
+    return [h_flex().flex_none().min_w(0).max_w(budget).overflow_hidden().gap(7).children(chips)];
   }
 
   header(t) {
@@ -858,17 +949,20 @@ export default class Git extends View {
       props: { commitMenu: { hash: c.hash, short: c.short, subject: c.subject, lamp: c.owner ? this.lampOf(c.owner) : null } } });
   }
 
+  // The full SHA on the clipboard, with a toast either way. The context menu's
+  // Copy Hash and the detail surface's header button share it.
+  async copyHash(c) {
+    const ok = await copyText(c.hash);
+    notify(ok
+      ? { title: "Hash copied", body: c.short, timeout: 1400 }
+      : { title: "Cannot copy", body: "No clipboard tool found (pbcopy, wl-copy, xclip)", level: "warning", timeout: 2200 });
+  }
+
   // The overlay copy's whole render. Copy runs before the popup closes, so its
   // task is not cancelled with the copy.
   commitMenuView(t, m) {
     const close = () => closeOverlay(props().overlay);
-    const copy = (cx) => cx.spawn(async () => {
-      const ok = await copyText(m.hash);
-      notify(ok
-        ? { title: "Hash copied", body: m.short, timeout: 1400 }
-        : { title: "Cannot copy", body: "No clipboard tool found (pbcopy, wl-copy, xclip)", level: "warning", timeout: 2200 });
-      close();
-    });
+    const copy = (cx) => cx.spawn(async () => { await this.copyHash(m); close(); });
     return v_flex().id("git-commit-menu").w_full().p(5).bg(t.popover).text_size(12.8)
       .track_focus(this.menuHandle)
       .on_key_down((e, cx) => {
@@ -930,16 +1024,47 @@ export default class Git extends View {
       // commit popup down, and the open row must read its own click as the toggle.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => this.pickCommit(c, cx))
-      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.commitMenu(t, c); })
+      // Right-clicking a commit opens its menu at the pointer. The detail a click
+      // opened goes down first: the menu replaces it, so the two surfaces never
+      // stand over the list together.
+      .on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation();
+        if (this.commitView) { this.commitView = null; cx.notify(); }
+        this.commitMenu(t, c);
+      })
       .child(this.gutter(t, g))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
-      .children(c.tags.map((tag) => this.tagChip(t, tag)))
-      .children(this.refChips(t, c, isHead))
+      .children(this.rowChips(t, c, isHead, g))
       .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? ""));
+    // Resting the pointer on the row opens the whole commit above it -- above,
+    // where the click-opened detail below never covers it. The card owns its
+    // delay and dismissal, so nothing here tracks the pointer or re-renders.
+    const card = HoverCard.new(`git-tip-${c.hash}`)
+      .open_delay(350).close_delay(160).anchor("bottom_left")
+      .trigger(row)
+      .content(this.commitTip(t, c, isHead));
     // A picked commit's details float under its own row instead of a panel below
     // the list: the row stays where it is, and the surface opens over what follows.
-    return Popup.new(`git-commit-pop-${c.hash}`, row).anchor("top_left")
+    return Popup.new(`git-commit-pop-${c.hash}`, card).anchor("top_left")
       .when(open, (e) => e.content(this.commitPopup(t)));
+  }
+
+  // The card a resting pointer opens: the whole row with nothing given up for
+  // room. The subject on the first line, the date at its right, and every tag
+  // and branch under it -- the ones the row itself had to shorten included.
+  // Sized like the commit popup: never wider than the panel, never taller than
+  // what the panel can show.
+  commitTip(t, c, isHead) {
+    const width = Math.max(240, Math.round((this.size?.width ?? 720) / this.unit) - 20);
+    const maxH = Math.max(150, Math.min(420, Math.round((this.size?.height ?? 560) / this.unit) - 120));
+    const specs = this.chipSpecs(c, isHead);
+    return v_flex().w(width).max_h(maxH).flex_none().gap(7).p(10).rounded(8).bg(t.popover)
+      .border_1().border_color(t.input).overflow_hidden()
+      .child(h_flex().gap(10).items_start()
+        .child(div().flex_1().min_w(0).text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? "")))
+      .when(specs.length > 0, (e) => e.child(
+        h_flex().flex_wrap().gap(7).children(specs.map((spec) => this.chipOf(t, spec, null)))));
   }
 
   confirmAllBar(t) {
@@ -996,7 +1121,11 @@ export default class Git extends View {
         div().id("git-log-resize").h(6).flex_none().w_full().cursor_row_resize()
           .when(this.resize, (s) => s.bg(t.accent))
           .when(!this.resize, (s) => s.hover((c) => c.bg(t.hover)))
-          .on_size_change((size) => { if (size.height > 0) this.unit = size.height / 6; })
+          .on_size_change((size, cx) => {
+            // `unit` maps window pixels to design pixels (the strip is 6 design
+            // pixels tall); the chip budget needs it as soon as it is known.
+            if (size.height > 0 && Math.abs(this.unit - size.height / 6) > 0.001) { this.unit = size.height / 6; cx.notify(); }
+          })
           .on_mouse_down("left", (ev, cx) => {
             cx.stop_propagation();
             this.resize = { startY: ev.position.y, h: this.logHeight };
@@ -1042,7 +1171,14 @@ export default class Git extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(h_flex().h(30).flex_none().pl(10).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("Commit"))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).font_family(MONO()).child(`${c.short} ${c.subject}`))
+        // The header says which commit this is, not what it says: the message is
+        // the body's first line, and the full SHA copies from the button.
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).font_family(MONO()).child(c.short))
+        .child(div().id("git-commit-copy").w(20).h(20).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .tooltip("Copy hash")
+          .on_click((_e, cx) => { cx.stop_propagation(); cx.spawn(async () => { await this.copyHash(c); }); })
+          .child(icon("copy").size(13).text_color(t.dim)))
         .child(div().id("git-commit-close").w(20).h(20).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.closeCommit(cx); })
@@ -1084,7 +1220,11 @@ export default class Git extends View {
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
-      .on_size_change((size) => { this.size = size; })
+      .on_size_change((size, cx) => {
+        // The row's chip budget is measured against these, so a change redraws
+        // once with the new share rather than waiting for the next refresh.
+        if (size.width !== this.size?.width || size.height !== this.size?.height) { this.size = size; cx.notify(); }
+      })
       // Dragging the Commits pane's top edge resizes the log. The strip stops the
       // press; a press anywhere else, leaving the panel, or a press outside ends a
       // drag the pointer got away from, so it never resumes without a button held.
