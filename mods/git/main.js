@@ -5,12 +5,15 @@
 //
 // The history is not just HEAD: every local and remote branch's commits appear
 // together, newest first, and the color dot before each subject is that commit's
-// branch lamp (a remote branch borrows its local branch's color). Clicking the
-// branch name drops the list of every branch: pick one or more and the history
-// narrows to the commits their histories reach (nothing picked: all). Right-
-// clicking a commit opens a small menu at the pointer whose Copy Hash puts the
-// full SHA on the clipboard -- the row itself shows no hash. The Commits pane's
-// top edge drags to size it, and the size is remembered.
+// branch lamp (a remote branch borrows its local branch's color). The dots sit
+// in a graph: a vertical line runs dot to dot down the list, and where a branch
+// forks off or merges back the line bends into the trunk with a curve, so the
+// fork reads as a parent with two children above it. Clicking the branch name
+// drops the list of every branch: pick one or more and the history narrows to
+// the commits their histories reach (nothing picked: all). Right-clicking a
+// commit opens a small menu at the pointer whose Copy Hash puts the full SHA
+// on the clipboard -- the row itself shows no hash. The Commits pane's top
+// edge drags to size it, and the size is remembered.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane, which shows it side by side in the main
@@ -19,7 +22,7 @@
 // machine or a remote space's. Reads write nothing under .git, so the folder watch
 // stays quiet.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popup } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
@@ -74,6 +77,114 @@ function numstat(out) {
   return map;
 }
 
+// ---- the commit graph ----
+// The dot column before the subjects is drawn, not built from divs. The list is
+// a graph, not a column of dots: a commit's dot takes the line waiting for it,
+// leftmost; with none waiting (a branch tip) it opens its own. Its first parent
+// runs on in that line; every other parent opens a new line to the right with a
+// curve, so a merge leaves its dot as a line that bends out and down; a line
+// another line got to first (a side branch rejoining the trunk) bends into that
+// dot with the same curve, the fork the picture reads as a parent with two
+// children above it. Lines carry the lamp of the branch they belong to: the
+// tip nearest the line's commits, walked down the parents. The geometry is
+// plain commands, so it can be exercised without a window; the row view turns
+// each into a stroke path. Design pixels: a row is 24 tall (see commitRow),
+// lanes are 14 apart, and the curves have radius 7.
+const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 2 };
+const KAPPA = 0.5523;
+
+// `tipName(c)` names the branch tip on a commit (the branch that colors it; a
+// remote borrows its local name), `lampOf(name)` its lamp.
+function graphRows(commits, tipName, lampOf) {
+  const pos = new Map(commits.map((c, i) => [c.hash, i]));
+  // Each line's lamp: the branch tip nearest its commits. Walk down from every
+  // tip (a short hop apart), so a merged branch's line keeps its own color.
+  const near = new Array(commits.length).fill(null);
+  const q = [];
+  for (let i = 0; i < commits.length; i++) { const n = tipName(commits[i]); if (n) { near[i] = n; q.push(i); } }
+  for (let h = 0; h < q.length; h++) for (const ph of commits[q[h]].parents) {
+    const j = pos.get(ph);
+    if (j !== undefined && near[j] === null) { near[j] = near[q[h]]; q.push(j); }
+  }
+  const X = (l) => GRAPH.x0 + l * GRAPH.pitch;
+  const rows = commits.map(() => []);
+  const lanes = commits.map(() => 0);
+  const colors = commits.map(() => "dim");
+  const vert = (r, l, y0, y1, color) => rows[r].push({ c: color, p: [["M", X(l), y0], ["L", X(l), y1]] });
+  const active = [];   // lane -> { hash, color }: the line waiting there, or null
+  let maxLane = 0;
+  for (let i = 0; i < commits.length; i++) {
+    const c = commits[i], rd = GRAPH.r, k = rd * KAPPA;
+    // The lines waiting for this commit, leftmost first: the first takes the dot.
+    const waiting = [];
+    for (let l = 0; l < active.length; l++) if (active[l] && active[l].hash === c.hash) waiting.push(l);
+    let lc = waiting[0];
+    if (lc === undefined) {
+      lc = active.findIndex((a) => !a);
+      if (lc === -1) { lc = active.length; active.push(null); }
+    }
+    lanes[i] = lc; if (lc > maxLane) maxLane = lc;
+    const own = near[i] ? lampOf(near[i]) : (c.owner ? lampOf(c.owner) : "dim");
+    const color = waiting.length ? active[lc].color : own;
+    colors[i] = color;
+    // What is already on the way: a line whose commit is this one bends into
+    // the dot (the dot's own line just runs into it); the rest run through.
+    for (let l = 0; l < active.length; l++) {
+      const a = active[l];
+      if (!a || l === lc) continue;
+      if (a.hash === c.hash) {
+        const xb = X(l), xa = X(lc);
+        vert(i, l, 0, 12 - rd, a.color);
+        rows[i].push({ c: a.color, p: [["M", xb, 12 - rd], ["C", xb - rd, 12, xb, 12 - rd + k, xb - rd + k, 12], ["L", xa + 3, 12]] });
+        active[l] = null;
+      } else {
+        vert(i, l, 0, 24, a.color);
+      }
+    }
+    if (waiting.length) vert(i, lc, 0, 12, color);
+    // The first parent runs on in this line; with no parent under the window
+    // the line trails off. Other parents open new lines to the right, each in
+    // the lamp of the branch it belongs to.
+    const p0 = c.parents[0], j0 = p0 === undefined ? undefined : pos.get(p0);
+    if (c.parents.length) {
+      if (j0 !== undefined && j0 > i) active[lc] = { hash: p0, color };
+      else active[lc] = null;
+      vert(i, lc, 12, 24, color);
+    } else active[lc] = null;
+    for (let kk = 1; kk < c.parents.length; kk++) {
+      const j = pos.get(c.parents[kk]);
+      if (j === undefined || j <= i) continue;
+      let r = -1;
+      for (let l = lc + 1; l < active.length; l++) if (!active[l]) { r = l; break; }
+      if (r === -1) { r = active.length; active.push(null); }
+      if (r > maxLane) maxLane = r;
+      const side = near[j] ? lampOf(near[j]) : color;
+      const xa = X(lc), xb = X(r);
+      rows[i].push({ c: side, p: [["M", xa + 3, 12], ["L", xb - rd, 12], ["C", xb, 12 + rd, xb - rd + k, 12, xb, 12 + rd - k]] });
+      vert(i, r, 12 + rd, 24, side);
+      active[r] = { hash: c.parents[kk], color: side };
+    }
+  }
+  return { rows, lanes, colors, maxLane };
+}
+
+// One row's line pieces as a single stroke path. The pieces are in design
+// pixels (the row is 24 tall, the layer `width` wide); painted coordinates are
+// percentages of the layer, which the window scales with the app's zoom, so
+// the lines land on the dots at any zoom like the layout around them. Stroke
+// widths are not scaled, so they carry the zoom themselves.
+function strokePath(pieces, width) {
+  const x = (v) => `${((v / width) * 100).toFixed(4)}%`;
+  const y = (v) => `${((v / 24) * 100).toFixed(4)}%`;
+  const b = PathBuilder.stroke(GRAPH.line * (Number(settings()?.zoom) || 1));
+  for (const piece of pieces) for (const cmd of piece.p) {
+    if (cmd[0] === "M") b.move_to(x(cmd[1]), y(cmd[2]));
+    else if (cmd[0] === "L") b.line_to(x(cmd[1]), y(cmd[2]));
+    else b.cubic_bezier_to(x(cmd[1]), y(cmd[2]), x(cmd[3]), y(cmd[4]), x(cmd[5]), y(cmd[6]));
+  }
+  return b.build();
+}
+
 // VS Code's letters: untracked reads U, conflicted reads !.
 const shownLetter = (f, staged) => f.conflict ? "!" : staged ? f.x : f.untracked ? "?" : f.y;
 const letterText = (l) => (l === "?" ? "U" : l === " " ? "M" : l);
@@ -100,6 +211,9 @@ export default class Git extends View {
     // measured on the drag strip (1 until it first lays out).
     this.branchPick = false; this.picked = new Set();
     this.localRefs = []; this.remoteRefs = [];
+    // The graph geometry for the shown commit list, rebuilt when the commits
+    // or the picker change.
+    this._graph = null;
     const saved = Number(localStorage.getItem("logHeight"));
     this.logHeight = Number.isFinite(saved) && saved >= 72 ? Math.min(saved, 900) : 190;
     this.resize = null; this.size = null; this.unit = 1;
@@ -242,6 +356,9 @@ export default class Git extends View {
           }
           for (const k of deferred) {
             let i = lampIndex(k);
+            // More branches than lamps: the extras share a color rather than
+            // probing forever (every lamp can already be taken).
+            if (taken.size >= LAMPS.length) { lamps.set(k, LAMPS[i]); continue; }
             while (taken.has(i)) i = (i + 1) % LAMPS.length;
             taken.add(i); lamps.set(k, LAMPS[i]);
           }
@@ -261,7 +378,7 @@ export default class Git extends View {
         this.branch = branch; this.upstream = upstream; this.ahead = ahead; this.behind = behind;
         this.remotes = remotes; this.lamps = lamps;
         this.localRefs = localRefs; this.remoteRefs = remoteRefs;
-        this.commits = commits;
+        this.commits = commits; this._graph = null;
         // A picked branch that is gone would leave the filter showing nothing;
         // drop it instead.
         for (const name of [...this.picked]) if (!remotes.has(name) && !localRefs.includes(name)) this.picked.delete(name);
@@ -536,7 +653,7 @@ export default class Git extends View {
         .when(on, (e) => e.bg(t.selected))
         .when(!on, (e) => e.hover((s) => s.bg(t.hover)))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); cx.notify(); })
+        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); this._graph = null; cx.notify(); })
         .child(div().size(9).flex_none().rounded(5).bg(t[this.lampOf(name)]))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(on ? t.foreground : t.muted).child(name))
         .when(name === this.branch, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("current")))
@@ -551,7 +668,7 @@ export default class Git extends View {
       .child(h_flex().id("git-bp-all").h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .when(picked.size === 0, (e) => e.bg(t.selected))
         .when(picked.size > 0, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => { picked.clear(); cx.notify(); })
+        .on_click((_e, cx) => { picked.clear(); this._graph = null; cx.notify(); })
         .child(icon("git").size(11).text_color(t.muted))
         .child(div().flex_1().text_size(12).text_color(picked.size ? t.muted : t.foreground).child("All branches"))
         .when(picked.size === 0, (e) => e.child(icon("check").size(12).text_color(t.accent))))
@@ -682,7 +799,40 @@ export default class Git extends View {
         .child(div().text_size(11).text_color(t.dim).child("Enter")));
   }
 
-  commitRow(t, c) {
+  // The graph for the shown list, cached until the commits or the picker
+  // changes. Each row keeps the dot's lane x, its lamp, and the line pieces.
+  graph(commits) {
+    const picked = [...this.picked].sort().join("\n");
+    const hit = this._graph;
+    if (hit && hit.src === this.commits && hit.picked === picked) return hit;
+    // A commit's line is colored by the branch tip on it: the current branch
+    // first, then any branch the picker has on (nothing picked: all of them).
+    const tipName = (c) => {
+      const names = (c.tips ?? []).filter((n) => !this.picked.size || this.picked.has(n));
+      return names.find((n) => n === this.branch) ?? names[0] ?? null;
+    };
+    const { rows, lanes, colors, maxLane } = graphRows(commits, tipName, (n) => this.lampOf(n));
+    const width = GRAPH.x0 * 2 + maxLane * GRAPH.pitch;
+    this._graph = { src: this.commits, picked,
+      rows: rows.map((items, i) => ({ x: GRAPH.x0 + lanes[i] * GRAPH.pitch, width, items, color: colors[i] })) };
+    return this._graph;
+  }
+
+  // One row's dot column: the lines under the dot, grouped into one painted
+  // layer per lamp, and the dot itself on top.
+  gutter(t, g) {
+    const byLamp = new Map();
+    for (const piece of g.items) {
+      if (!byLamp.has(piece.c)) byLamp.set(piece.c, []);
+      byLamp.get(piece.c).push(piece);
+    }
+    return div().w(g.width).h_full().flex_none()
+      .children([...byLamp].map(([name, pieces]) =>
+        window.paint_path(strokePath(pieces, g.width), t[name]).absolute().top(0).left(0).size_full()))
+      .child(div().absolute().top(7.5).left(g.x - 4.5).size(9).rounded(5).bg(t[g.color]));
+  }
+
+  commitRow(t, c, g) {
     const open = this.commitView?.hash === c.hash;
     const isHead = c.hash === this.headSha;
     return h_flex().id(`git-c-${c.hash}`).h(24).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
@@ -690,7 +840,7 @@ export default class Git extends View {
       .when(!open, (e) => e.hover((s) => s.bg(t.hover)))
       .on_click((_e, cx) => this.pickCommit(c, cx))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.commitMenu(t, c); })
-      .child(div().size(9).flex_none().rounded(5).bg(c.owner ? t[this.lampOf(c.owner)] : t.dim))
+      .child(this.gutter(t, g))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
       .children(c.tags.map((tag) => this.tagChip(t, tag)))
       .when(isHead, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(this.branch ?? "HEAD")))
@@ -737,6 +887,7 @@ export default class Git extends View {
   // it lays out). The count reads "<shown>/<all>" while a branch filter is on.
   historySection(t) {
     const commits = this.shownCommits();
+    const graph = this.graph(commits);
     const filtered = this.picked.size > 0;
     return v_flex().flex_none().border_t(1).border_color(t.border)
       .when(!this.historyCollapsed, (e) => e.child(
@@ -764,7 +915,7 @@ export default class Git extends View {
           .child(icon("refresh").size(13).text_color(t.dim))))
       .when(!this.historyCollapsed, (e) => e.child(
         v_flex().id("git-log").h(this.logHeight).flex_none().py(4).overflow_y_scrollbar()
-          .children(commits.map((c) => this.commitRow(t, c)))
+          .children(commits.map((c, i) => this.commitRow(t, c, graph.rows[i])))
           .when(!commits.length, (e) => e.child(div().p(10).text_size(12).text_color(t.dim)
             .child(filtered ? "No commits in the picked branches" : this.hasHead ? "No commits" : "No commits yet")))));
   }
