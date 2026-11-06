@@ -8,10 +8,12 @@
 // column, full width, every code row green for the addition or red for the removal.
 // Hunk headers and file metadata span the full width in both.
 //
-// For a live file on this machine (not a commit's old version, not a binary), the
-// header carries an Edit button: the pane turns into an editor for the file, with
-// Save writing it back only while it still matches what was read, then refreshing
-// the diff. Leaving with unsaved changes asks once.
+// For a file on this machine (not a binary), the header carries an Edit button: the
+// pane turns into an editor for the file on disk, with Save writing it back only
+// while it still matches what was read, then refreshing the diff. A commit's diff is
+// no exception: the editor holds the working-tree copy (the only one a save can
+// write), while the diff behind keeps showing the commit's version. Leaving with
+// unsaved changes asks once.
 //
 // It never writes to the repository, follows the panel (another click updates the
 // same pane), and follows the panel's machine for a remote space.
@@ -184,9 +186,9 @@ export default class GitDiff extends View {
 
   // ---- editing the live file ----
 
-  // Editable: this machine (writes are local), the file as it is on disk (not a
-  // commit's old version), and text.
-  editable(target) { return Boolean(target?.path) && !target.on && target.mode !== "commit" && !target.binary; }
+  // Editable: this machine (writes are local) and text. A commit's diff is no
+  // exception: the editor holds the working-tree file, the copy a save writes.
+  editable(target) { return Boolean(target?.path) && !target.on && !target.binary; }
 
   leave() {
     this.code?.release();
