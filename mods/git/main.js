@@ -963,22 +963,22 @@ export default class Git extends View {
   commitMenuView(t, m) {
     const close = () => closeOverlay(props().overlay);
     const copy = (cx) => cx.spawn(async () => { await this.copyHash(m); close(); });
-    return v_flex().id("git-commit-menu").w_full().p(5).bg(t.popover).text_size(12.8)
+    return v_flex().id("git-commit-menu").w_full().p(4).bg(t.popover).text_size(11.5)
       .track_focus(this.menuHandle)
       .on_key_down((e, cx) => {
         if (e.key === "escape") { cx.stop_propagation(); close(); }
         else if (e.key === "enter") { cx.stop_propagation(); copy(cx); }
       })
-      .child(h_flex().h(24).px(8).gap(8).items_center()
-        .when(Boolean(m.lamp), (e) => e.child(div().size(9).flex_none().rounded(5).bg(t[m.lamp])))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${m.short} ${m.subject || ""}`)))
-      .child(div().mx(7).my(3).h(1).bg(t.border))
-      .child(h_flex().id("git-menu-copy").h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
+      .child(h_flex().h(21).px(7).gap(7).items_center()
+        .when(Boolean(m.lamp), (e) => e.child(div().size(8).flex_none().rounded(4).bg(t[m.lamp])))
+        .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(`${m.short} ${m.subject || ""}`)))
+      .child(div().mx(6).my(2).h(1).bg(t.border))
+      .child(h_flex().id("git-menu-copy").h(26).px(7).gap(7).rounded(6).items_center().text_color(t.foreground)
         .hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => copy(cx))
-        .child(icon("copy").size(14).text_color(t.muted))
+        .child(icon("copy").size(12).text_color(t.muted))
         .child(div().flex_1().child("Copy Hash"))
-        .child(div().text_size(11).text_color(t.dim).child("Enter")));
+        .child(div().text_size(10).text_color(t.dim).child("Enter")));
   }
 
   // The graph for the shown list, cached until the commits or the picker
