@@ -771,7 +771,7 @@ export default class Git extends View {
     const busy = this.busy || this.loading;
     return h_flex().h(42).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
       .child(icon("git").size(15).text_color(t.accent))
-      .child(div().font_semibold().child("Source Control"))
+      .child(div().font_semibold().child("Git"))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(repo ?? ""))
       .child(div().id("git-refresh").w(24).h(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
         .hover((s) => s.bg(t.hover))

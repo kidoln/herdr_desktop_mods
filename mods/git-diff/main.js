@@ -320,7 +320,7 @@ export default class GitDiff extends View {
         (range) => list.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())
       .child(Scrollbar.vertical("git-diff-rows").viewport_from_layout().absolute().inset_0())
       .when(!list.length, (e) => e.child(div().absolute().top(8).px(12).text_color(t.dim)
-        .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Source Control to compare it here"))));
+        .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Git to compare it here"))));
   }
 
   editorBody(t) {
