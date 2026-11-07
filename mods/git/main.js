@@ -11,8 +11,9 @@
 // fork reads as a parent with two children above it. Clicking the branch name
 // drops the list of every branch: pick one or more and the history narrows to
 // the commits their histories reach (nothing picked: all). Right-clicking a
-// commit opens a small menu at the pointer whose Copy Hash puts the full SHA
-// on the clipboard -- the row itself shows no hash. A row's own business is
+// commit opens a small menu at the pointer: Copy Hash puts the full SHA on the
+// clipboard (the row itself shows no hash), and Create Branch asks for a name
+// and makes that branch at the commit, switching to it. A row's own business is
 // its subject: the message keeps its share of the width and the tag and branch
 // chips are cut to what is left of the row, the rest reading as one "+N" pill,
 // so a long tag name can never squeeze the message out. Resting the pointer on
@@ -235,6 +236,23 @@ export default class Git extends View {
     if (props()?.commitMenu) {
       this.menuHandle = cx.focus_handle();
       this.menuHandle.focus();
+      return;
+    }
+    // A create-branch dialog copy: no panel either, just the form's input and
+    // keys. The commit and the repository to work in arrive as props.
+    if (props()?.createBranch) {
+      this.branchName = "";
+      this.branchError = "";
+      this.branchBusy = false;
+      this.branchFocused = true;
+      this.branchHandle = cx.focus_handle();
+      this.branchInput = InputState.new({ placeholder: "Branch name" });
+      this.branchInput.on("change", (_e, cx) => { this.branchName = this.branchInput.value(); this.branchError = ""; cx.notify(); });
+      this.branchInput.on("submit", (_e, cx) => this.createBranch(cx));
+      this.branchInput.on("focus", (_e, cx) => { this.branchFocused = true; cx.notify(); });
+      this.branchInput.on("blur", (_e, cx) => { this.branchFocused = false; cx.notify(); });
+      this.branchInput.focus();
+      cx.timer.after(600, () => this.branchInput.focus());
       return;
     }
     this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
@@ -943,10 +961,12 @@ export default class Git extends View {
   }
 
   // Right-clicking a commit opens a small menu (an overlay copy of this mod, which
-  // renders the menu only) at the pointer: the branch lamp, the commit, Copy Hash.
+  // renders the menu only) at the pointer: the branch lamp, the commit, Copy Hash,
+  // Create Branch. The repository travels in the props, since the dialog copy the
+  // Create Branch item opens has no panel of its own to read one from.
   commitMenu(t, c) {
     openOverlay({ mod: "git", kind: "popup", width: 250,
-      props: { commitMenu: { hash: c.hash, short: c.short, subject: c.subject, lamp: c.owner ? this.lampOf(c.owner) : null } } });
+      props: { commitMenu: { hash: c.hash, short: c.short, subject: c.subject, lamp: c.owner ? this.lampOf(c.owner) : null, cwd: this.root, on: this.on } } });
   }
 
   // The full SHA on the clipboard, with a toast either way. The context menu's
@@ -978,7 +998,60 @@ export default class Git extends View {
         .on_click((_e, cx) => copy(cx))
         .child(icon("copy").size(12).text_color(t.muted))
         .child(div().flex_1().child("Copy Hash"))
-        .child(div().text_size(10).text_color(t.dim).child("Enter")));
+        .child(div().text_size(10).text_color(t.dim).child("Enter")))
+      .child(h_flex().id("git-menu-branch").h(26).px(7).gap(7).rounded(6).items_center().text_color(t.foreground)
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          close();
+          openOverlay({ mod: "git", kind: "dialog", width: 420, height: 216,
+            props: { createBranch: { hash: m.hash, short: m.short, subject: m.subject, cwd: m.cwd, on: m.on } } });
+        })
+        .child(icon("branch").size(12).text_color(t.muted))
+        .child(div().flex_1().child("Create Branch\u2026")));
+  }
+
+  // The create-branch form (another overlay copy). Enter creates and switches:
+  // `git switch -c <name> <commit>` makes the branch at the commit and moves
+  // the checkout to it in one step. Failures read in the form; the toast
+  // confirms the switch.
+  branchDialogView(t, b) {
+    const close = () => closeOverlay(props().overlay);
+    const busy = this.branchBusy, ready = Boolean(this.branchName.trim()) && !busy;
+    return v_flex().id("git-branch-dialog").size_full().track_focus(this.branchHandle)
+      .on_key_down((e, cx) => {
+        if (e.key === "escape") { cx.stop_propagation(); close(); }
+        else if (e.key === "enter" && !this.branchFocused) { cx.stop_propagation(); this.createBranch(cx); }
+      })
+      .p(16).gap(10).bg(t.popover).text_size(13).text_color(t.foreground)
+      .child(div().font_semibold().child("New branch"))
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).font_family(MONO()).text_size(10).text_color(t.dim).child(b.short))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(b.subject || "")))
+      .child(Input.new(this.branchInput).h(32).px(10).items_center().rounded(6).border(1)
+        .border_color(this.branchFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
+      .when(Boolean(this.branchError), (e) => e.child(div().flex_none().truncate().text_size(11.5).text_color(t.ansi1).child(this.branchError)))
+      .child(div().flex_1())
+      .child(h_flex().items_center().gap(8)
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(busy ? "creating\u2026" : "\u21b5 create \u00b7 esc cancel"))
+        .child(this.textButton("git-branch-cancel", "Cancel", t.background, t.foreground, () => close(), t))
+        .child(this.textButton("git-branch-create", "Create", ready ? t.solid : t.raised, ready ? t.solid_foreground : t.dim, (cx) => this.createBranch(cx), t)));
+  }
+
+  async createBranch(cx) {
+    if (this.branchBusy) return;
+    const b = props().createBranch;
+    const name = this.branchName.trim();
+    if (!name) { this.branchError = "Type a branch name."; cx.notify(); return; }
+    this.branchBusy = true; this.branchError = ""; cx.notify();
+    try {
+      const r = await exec("git", ["switch", "-c", name, b.hash], { cwd: b.cwd, on: b.on });
+      if (r.code !== 0) { this.branchError = (r.stderr || r.stdout || "git switch failed").trim(); this.branchBusy = false; cx.notify(); return; }
+      notify({ title: "Branch created", body: `${name} at ${b.short}`, timeout: 1600 });
+      closeOverlay(props().overlay);
+    } catch (e) {
+      this.branchError = String(e); this.branchBusy = false; cx.notify();
+    }
   }
 
   // The graph for the shown list, cached until the commits or the picker
@@ -1201,6 +1274,7 @@ export default class Git extends View {
 
   render(cx) {
     if (props()?.commitMenu) return this.commitMenuView(theme(), props().commitMenu);
+    if (props()?.createBranch) return this.branchDialogView(theme(), props().createBranch);
     if (ctxKey() !== this.context) this.refresh(cx);
     const t = theme();
 
