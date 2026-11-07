@@ -21,6 +21,10 @@
 // the date, every tag and branch under that, nothing shortened. The Commits
 // pane's top edge drags to size it, and the size is remembered.
 //
+// A folder that is not a repository yet reads so in the middle of the panel, with
+// a button that runs `git init` there and reads it again; nothing else in the panel
+// draws while there is no repository to draw from.
+//
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane in the main area — side by side, or a single
 // green (new file) / red (deleted file) column when there is no other side to pair.
@@ -299,7 +303,7 @@ export default class Git extends View {
       this.context = context; this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
       this.commitView = null;
       this.message = ""; this.input.set_value("");
-      this.error = null; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
+      this.error = null; this.notRepo = false; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
       this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0; this.remotes = null; this.lamps = null;
       this.localRefs = []; this.remoteRefs = []; this.branchPick = false; this.picked = new Set(); this.resize = null;
       this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false;
@@ -312,7 +316,7 @@ export default class Git extends View {
         if (ctxKey() !== context) return;
         if (top.code !== 0) {
           this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-          this.commitView = null; this.error = "Not a git repository"; return;
+          this.commitView = null; this.error = "Not a git repository"; this.notRepo = true; return;
         }
         const root = top.stdout.trim();
         const g = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -440,7 +444,7 @@ export default class Git extends View {
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
         this.unstaged = parsed.filter((f) => f.unstaged).map((f) => ({ ...f, ...(workStats[f.path] ?? {}) }));
-        this.error = null; this.watch(root, cx);
+        this.error = null; this.notRepo = false; this.watch(root, cx);
         // A commit's file list never changes, so it is read once when opened. A
         // background refresh only retries it if that first read has not succeeded yet.
         if (this.commitView && !this.commitView.loaded) {
@@ -606,6 +610,22 @@ export default class Git extends View {
     this.mutate(cx, async (root, on) => {
       this.fail(await this.git(root, on, ["restore", "--", "."]));
       await this.git(root, on, ["clean", "-f", "-d", "-q"]);
+    });
+  }
+
+  // The empty state's button: make the shown folder a repository and read it
+  // again. `mutate` is about a repository, so the write runs here with the same
+  // one-at-a-time busy flag; the folder is read at the press, like refresh does,
+  // so a changed focus inits where the panel is looking now.
+  initRepo(cx) {
+    if (this.busy || this.loading) return;
+    const { cwd, on } = location(), context = ctxKey();
+    if (!cwd) return;
+    this.busy = true; this.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try { this.fail(await exec("git", ["init"], { cwd, on }), "git init failed"); }
+      catch (e) { if (ctxKey() === context) this.note = String(e); }
+      finally { this.busy = false; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
     });
   }
 
@@ -1150,7 +1170,13 @@ export default class Git extends View {
   emptyState(t) {
     return v_flex().flex_1().items_center().justify_center().gap(8).p(16)
       .child(icon("git").size(26).text_color(t.dim))
-      .child(div().text_size(12).text_color(t.dim).text_center().child(this.error || (this.loading ? "Loading\u2026" : "No folder")));
+      .child(div().text_size(12).text_color(t.dim).text_center().child(this.error || (this.loading ? "Loading\u2026" : "No folder")))
+      // A folder with no repository offers to make one. While `git init` runs the
+      // button names the work and does nothing; the panel refreshes when it lands.
+      .when(this.notRepo, (e) => e.child(
+        this.textButton("git-init", this.busy ? "Initializing\u2026" : "Initialize Repository",
+          this.busy ? t.raised : t.solid, this.busy ? t.dim : t.solid_foreground, (cx) => this.initRepo(cx), t)
+          .mt(4)));
   }
 
   // The Commits pane's top edge, dragged: the log grows as the pointer rises.
