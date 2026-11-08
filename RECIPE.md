@@ -1,13 +1,16 @@
-# Herdr Git Workspace
+# Herdr Desktop Mods
 
-A Herdr window turned into a Git-centered workspace: the left sidebar keeps
-spaces and agents, the right sidebar is a stack of Files / Changes / a
-VS Code-shaped Git panel (commit box, staged and changed files, the branch
-with its upstream, a commit graph), the tab bar carries Files / Changes / Git
-buttons, and the status bar's branch is a button. The main area shows terminal
+A set of custom Herdr mods plus a window layout (named `herdr-git`) that
+assembles them: a Git-centered workspace — the left sidebar keeps spaces and
+agents, the right sidebar is a stack of Files / Changes / a VS Code-shaped Git
+panel (commit box, staged and changed files, the branch with its upstream, a
+commit graph), the tab bar carries Files / Changes / Git buttons, the status
+bar's branch is a button — and beyond Git: a fuller file manager (selection,
+context menu, rename/copy/paste/delete), an agents list led by each row's
+status, and the reworked tab bar and status bar. The main area shows terminal
 panes, with diffs and file editing opening in the tab as panes of their own.
 
-![Herdr Git Workspace](preview.png)
+![Herdr Desktop Mods](preview.png)
 
 The preview shows a demo repository (`main`, one commit ahead of `origin/main`,
 one staged file, two changed, one untracked), the `opencode` agent in the top

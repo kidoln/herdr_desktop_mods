@@ -1,12 +1,12 @@
-# Herdr Git 工作台 · Herdr Git Workspace
+# Herdr 桌面增强 mods · Herdr Desktop Mods
 
-> 一套 [Herdr](https://herdr.dev) 自定义 mod + 窗口布局，把默认窗口改造成以 Git 为中心的开发工作台：右侧是 VS Code 风格的源代码管理面板（提交、分支、提交历史图），主区可以并排看 diff、就地编辑文件，状态栏一键切换分支，Files 面板支持完整的文件操作。
+> 一套 [Herdr](https://herdr.dev) 自定义 mod + 窗口布局：除了 Git 工作台（VS Code 风格的源代码管理面板、并排 diff、就地编辑、分支切换），还带来了更完整的文件管理（多选、右键菜单、重命名/复制/粘贴/删除）和改版的 Agents 列表、标签栏与状态栏。
 >
-> A set of custom [Herdr](https://herdr.dev) mods plus a window layout that turns the default window into a Git-centered workspace: a VS Code-style Source Control panel (commits, branches, a commit graph), side-by-side diffs and in-place file editing in the main area, one-click branch switching in the status bar, and full file operations in the Files panel.
+> A set of custom [Herdr](https://herdr.dev) mods plus a window layout: a Git workspace (a VS Code-style Source Control panel, side-by-side diffs, in-place editing, branch switching) — and beyond Git, a fuller file manager (selection, context menu, rename/copy/paste/delete) and a reworked agents list, tab bar and status bar.
 
 [中文](#zh) · [English](#en)
 
-![Herdr Git 工作台](preview.png)
+![Herdr 桌面增强 mods](preview.png)
 
 ---
 
