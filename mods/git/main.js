@@ -5,7 +5,7 @@
 //
 // The history is not just HEAD: every local and remote branch's commits appear
 // together, newest first, and the color dot before each subject is that commit's
-// branch lamp (a remote branch borrows its local branch's color). The dots sit
+// branch lamp (each ref its own of twelve, no two in a window alike). The dots sit
 // in a graph: a vertical line runs dot to dot down the list, and where a branch
 // forks off or merges back the line bends into the trunk with a curve, so the
 // fork reads as a parent with two children above it. Clicking the branch name
@@ -66,11 +66,15 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/git/${name}.svg`).flex_none();
 
-// One lamp color per branch, stable across reloads and repos: the same name always
-// hashes to the same palette entry, and two branches shown at once never share one
-// (refresh() probes a colliding name onward). A remote branch borrows its local
-// branch's color, so origin/main reads as main.
-const LAMPS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
+// One lamp color per ref, stable across reloads and repos: the same name always
+// hashes to the same palette entry, and a name whose lamp is taken probes onward,
+// so up to twelve refs in one window never share a color (ten with room to
+// spare); past that the extras share rather than probing forever. The six ansi
+// base hues come first; each family's second member -- its bright variant, or,
+// where there is one, the theme's saturated status color (done, blocked,
+// working) -- sits six slots later, so a neighbor and a probe's next free slot
+// land on another hue.
+const LAMPS = ["ansi4", "ansi1", "ansi2", "ansi5", "ansi6", "ansi3", "done", "blocked", "ansi10", "ansi13", "ansi14", "working"];
 function lampIndex(name) {
   let h = 0;
   for (const ch of String(name ?? "")) h = (h * 31 + ch.codePointAt(0)) >>> 0;
@@ -117,8 +121,8 @@ function numstat(out) {
 const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 1.25 };
 const KAPPA = 0.5523;
 
-// `tipName(c)` names the branch tip on a commit (the branch that colors it; a
-// remote borrows its local name), `lampOf(name)` its lamp.
+// `tipName(c)` names the branch tip on a commit (the branch that colors it),
+// `lampOf(name)` its lamp.
 function graphRows(commits, tipName, lampOf) {
   const pos = new Map(commits.map((c, i) => [c.hash, i]));
   // Each line's lamp: the branch tip nearest its commits. Walk down from every
@@ -132,9 +136,9 @@ function graphRows(commits, tipName, lampOf) {
   }
   // Where a line hands its lamp over: a commit that is a branch's tip. The
   // line running into it keeps its own lamp above the dot, the dot and the
-  // history below take the tip's branch's lamp. Only a branch's newest tip in
-  // the window hands over: a stale remote pointing into old shared history
-  // (gientech/feature_dev behind feature_dev's own tip) does not repaint it.
+  // history below take the tip's branch's lamp. Only a lamp's newest tip in
+  // the window hands over, which matters past twelve refs, where two names
+  // share a light.
   const claim = new Map();
   {
     const newest = new Map();   // lamp -> the topmost row carrying it
@@ -409,12 +413,15 @@ export default class Git extends View {
               for (const p of commits[i].parents) { const k = byHash.get(p); if (k !== undefined) stack.push(k); }
             }
           }
-          // Lamps for the branches shown: each keeps the color its name hashes to;
-          // a name whose lamp is taken probes onward, in this order, so two branches
-          // in one window never share a light.
-          const keyOf = (name) => (remotes.has(name) ? name.replace(/^[^/]+\//, "") : name);
+          // Lamps for every ref the picker lists, in the order the chips read:
+          // the current branch, then locals, then remotes. Each keeps the color
+          // its name hashes to; a name whose lamp is taken probes onward, so up
+          // to twelve refs never share a light (ten with room to spare) -- past
+          // that the extras share rather than probing forever.
           const keys = [];
-          for (const name of order) { const k = keyOf(name); if (!keys.includes(k)) keys.push(k); }
+          if (branch && localSet.has(branch)) keys.push(branch);
+          for (const name of localRefs) if (name !== branch) keys.push(name);
+          for (const name of remoteRefs) keys.push(name);
           const taken = new Set(), deferred = [];
           for (const k of keys) {
             const i = lampIndex(k);
@@ -422,7 +429,7 @@ export default class Git extends View {
           }
           for (const k of deferred) {
             let i = lampIndex(k);
-            // More branches than lamps: the extras share a color rather than
+            // More refs than lamps: the extras share a color rather than
             // probing forever (every lamp can already be taken).
             if (taken.size >= LAMPS.length) { lamps.set(k, LAMPS[i]); continue; }
             while (taken.has(i)) i = (i + 1) % LAMPS.length;
@@ -703,20 +710,14 @@ export default class Git extends View {
   }
 
   // The branch names whose last commit this row is, in the order their chips
-  // read: the current branch, then locals, then remotes. A remote borrows its
-  // local branch's spot (origin/main reads "main"); a remote with no local
-  // branch on that commit keeps its remote prefix, so it is not mistaken for a
-  // local branch. A row that is HEAD still shows HEAD, detached or not.
+  // read: the current branch, then locals, then remotes. A local branch and the
+  // remotes carrying the same commit all read ("main" and "origin/main" side by
+  // side, each with its own lamp). A row that is HEAD still shows HEAD,
+  // detached or not.
   refNames(c, isHead) {
-    const chosen = new Map();   // the branch -> the ref to show for it
-    for (const name of c.tips ?? []) {
-      const key = this.colorOf(name);
-      const cur = chosen.get(key);
-      if (!cur || this.betterRef(name, cur)) chosen.set(key, name);
-    }
-    const current = this.branch && this.branch !== "HEAD" ? this.branch : null;
-    const names = [...chosen.values()];
+    const names = [...new Set(c.tips ?? [])];
     names.sort((a, b) => this.refRank(a) - this.refRank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    const current = this.branch && this.branch !== "HEAD" ? this.branch : null;
     if (isHead && current && !names.includes(current)) names.unshift(current);
     else if (isHead && !current) names.unshift("HEAD");
     return names;
@@ -742,14 +743,6 @@ export default class Git extends View {
 
   // The order the chips read in: the current branch, then locals, then remotes.
   refRank(name) { return name === this.branch ? 0 : this.remotes?.has(name) ? 2 : 1; }
-
-  // Between two refs on the same branch: the local one wins, else origin's.
-  betterRef(a, b) {
-    const remote = (n) => Boolean(this.remotes?.has(n));
-    if (remote(a) !== remote(b)) return !remote(a);
-    if (remote(a) && a.startsWith("origin/") !== b.startsWith("origin/")) return a.startsWith("origin/");
-    return false;
-  }
 
   refChip(t, name, current, maxText) {
     return h_flex().flex_none().gap(4).px(5).py(1).rounded(4).bg(t.raised).items_center()
@@ -987,14 +980,10 @@ export default class Git extends View {
       .children(hovered || confirming ? actions : []);
   }
 
-  // The lamp key for a ref: a remote branch borrows its local branch's color.
-  colorOf(name) { return name && this.remotes?.has(name) ? name.replace(/^[^/]+\//, "") : name; }
-
-  // The palette entry ("ansi4", ...) for a ref: this refresh's assignment when the
-  // branch is shown, else its own hash.
+  // The palette entry ("ansi4", ...) for a ref: this refresh's assignment (every
+  // ref the picker knows), else its own hash.
   lampOf(name) {
-    const key = this.colorOf(name);
-    return this.lamps?.get(key) ?? LAMPS[lampIndex(key)];
+    return this.lamps?.get(name) ?? LAMPS[lampIndex(name)];
   }
 
   // Right-clicking a commit opens a small menu (an overlay copy of this mod, which
