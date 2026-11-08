@@ -1,5 +1,5 @@
 // A git source-control panel for the right sidebar, in the shape of VS Code's:
-// a commit box (Commit / Commit & Push), Staged Changes / Changes groups, per-file
+// a commit box (Commit / Pull & Push), Staged Changes / Changes groups, per-file
 // stage / unstage / discard, branch + ahead/behind status (with the upstream it
 // tracks), and a commit history (with the tags on each commit) in a panel below.
 //
@@ -283,7 +283,7 @@ export default class Git extends View {
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
     this.input.on("change", (_e, cx) => { this.message = this.input.value(); cx.notify(); });
-    this.input.on("submit", (_e, cx) => this.commit(cx, false));
+    this.input.on("submit", (_e, cx) => this.commit(cx));
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
@@ -653,19 +653,33 @@ export default class Git extends View {
     });
   }
 
-  commit(cx, push) {
+  commit(cx) {
     const message = this.message.trim();
     if (!message || this.busy || !this.root) return;
     const stageFirst = this.staged.length === 0; // VS Code's smart commit: nothing staged commits everything.
     this.mutate(cx, async (root, on) => {
       if (stageFirst) this.fail(await this.git(root, on, ["add", "-A"]));
       this.fail(await this.git(root, on, ["commit", "-m", message]), "Commit failed");
-      if (push) this.fail(await this.git(root, on, this.pushArgs()));
       this.message = ""; this.input.set_value("");
     });
   }
   push(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, this.pushArgs()))); }
   pull(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, ["pull", "--ff-only"]))); }
+  // The commit box's sync button: pull, then push. The pull rebases, so a branch
+  // that has diverged from its upstream is replayed on the upstream's tip
+  // instead of stopping at git's "how to reconcile" refusal (a plain pull or
+  // --ff-only refuses such a branch); --autostash parks uncommitted changes
+  // around it and brings them back, so the press works right after committing
+  // only part of the tree. A conflict (or a failed autostash restore) stops the
+  // run with git's message, and nothing is pushed. With no upstream there is
+  // nothing to pull, and the push half publishes the branch (-u), exactly as
+  // `Publish` does.
+  pullPush(cx) {
+    this.mutate(cx, async (root, on) => {
+      if (this.upstream) this.fail(await this.git(root, on, ["pull", "--rebase", "--autostash"]), "Pull failed");
+      this.fail(await this.git(root, on, this.pushArgs()), "Push failed");
+    });
+  }
 
   key(e, cx) {
     if (e.key === "escape") {
@@ -676,7 +690,7 @@ export default class Git extends View {
       else return;
       cx.stop_propagation(); cx.notify();
     } else if (e.keystroke === "cmd-enter" || e.keystroke === "ctrl-enter") {
-      this.commit(cx, false); cx.stop_propagation();
+      this.commit(cx); cx.stop_propagation();
     }
   }
 
@@ -905,16 +919,19 @@ export default class Git extends View {
 
   commitBox(t) {
     const ready = Boolean(this.message.trim() && this.root && !this.busy);
+    // The sync button is not a commit: it needs a repository to work in, not a
+    // message; a branch without an upstream still has the push half to run.
+    const sync = Boolean(this.root && !this.busy);
     const count = this.staged.length;
     const label = count > 0 ? `Commit (${count})` : this.unstaged.length > 0 ? "Commit All" : "Commit";
-    const button = (id, name, text, primary, onClick) =>
+    const button = (id, name, text, primary, enabled, onClick) =>
       h_flex().id(id).flex_1().min_w(0).h(30).items_center().justify_center().gap(6).rounded(8)
-        .bg(primary ? (ready ? t.solid : t.raised) : t.raised)
-        .text_color(primary ? (ready ? t.solid_foreground : t.dim) : ready ? t.foreground : t.dim)
-        .text_size(12).when(ready, (e) => e.cursor_pointer())
+        .bg(primary ? (enabled ? t.solid : t.raised) : t.raised)
+        .text_color(primary ? (enabled ? t.solid_foreground : t.dim) : enabled ? t.foreground : t.dim)
+        .text_size(12).when(enabled, (e) => e.cursor_pointer())
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); if (ready) onClick(cx); })
-        .child(icon(name).size(14).text_color(primary ? (ready ? t.solid_foreground : t.dim) : t.muted))
+        .on_click((_e, cx) => { cx.stop_propagation(); if (enabled) onClick(cx); })
+        .child(icon(name).size(14).text_color(primary ? (enabled ? t.solid_foreground : t.dim) : t.muted))
         .child(div().truncate().child(text));
     return v_flex().flex_none().p(10).gap(8).border_b(1).border_color(t.border)
       .child(div().id("git-message").w_full().min_h(32).px(10).py(6).flex().items_center().rounded(8).border_1()
@@ -922,8 +939,8 @@ export default class Git extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .child(Input.new(this.input).w_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().gap(8).items_center()
-        .child(button("git-commit", "check", label, true, (cx) => this.commit(cx, false)))
-        .child(button("git-commit-push", "arrow-up", "Commit & Push", false, (cx) => this.commit(cx, true))));
+        .child(button("git-commit", "check", label, true, ready, (cx) => this.commit(cx)))
+        .child(button("git-pull-push", "pull-push", "Pull & Push", false, sync, (cx) => this.pullPush(cx))));
   }
 
   sectionRow(t, r) {

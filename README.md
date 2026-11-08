@@ -49,7 +49,7 @@
 
 #### `git` — 源代码管理面板
 
-- **提交**：提交框支持 `Commit`（暂存区为空时相当于 VS Code 的 “全部提交”）和 `Commit & Push`；Cmd/Ctrl+Enter 直接提交。没有 upstream 时显示 `Publish`，首次推送并设置 upstream。
+- **提交**：提交框支持 `Commit`（暂存区为空时相当于 VS Code 的 “全部提交”）和 `Pull & Push`（不是提交，空消息也能按）：pull 用 `--rebase --autostash`，分叉时把本地提交重放到远端之上、未提交改动自动暂存并恢复；冲突或恢复失败就停下并显示 git 报错，不推送。Cmd/Ctrl+Enter 直接提交。没有 upstream 时按钮只做推送（首次推送并设置 upstream），分支行仍显示 `Publish`。
 - **暂存**：`Staged Changes` / `Changes` 两组可折叠；每行显示状态字母（M/A/D/U/R/!）、路径与 +/− 行数；悬停出现按钮：暂存 / 取消暂存 / 丢弃（丢弃需点第二次确认；整组丢弃有确认弹窗）。
 - **分支**：分支行显示当前分支（按分支配色）、upstream、ahead/behind 计数（点击即 push / pull，pull 用 `--ff-only`）。
 - **分支列表**：点分支名展开（本地 / Remote 分组），可多选；提交历史会收缩为所选分支能到达的提交，不选 = 全部分支。
@@ -179,7 +179,7 @@ The window looks like this:
 
 #### `git` — the Source Control panel
 
-- **Commit**: message box with `Commit` (when nothing is staged it stages everything, VS Code's smart commit) and `Commit & Push`; Cmd/Ctrl+Enter commits. Without an upstream the row shows `Publish` (pushes and sets the upstream).
+- **Commit**: message box with `Commit` (when nothing is staged it stages everything, VS Code's smart commit) and `Pull & Push` (not a commit — it works without a message): pull `--rebase --autostash`, then push — a diverged branch has its local commits replayed on the upstream's tip and uncommitted changes are parked and restored; a conflict or a failed restore stops the run with git's message, nothing pushed. Cmd/Ctrl+Enter commits. Without an upstream the button's push half publishes the branch (and sets the upstream); the row's `Publish` is still there.
 - **Staging**: collapsible `Staged Changes` / `Changes` groups; every row shows the status letter (M/A/D/U/R/!), path and +/− line counts; hovering reveals stage / unstage / discard buttons (discard asks for a second click; discarding everything asks in a dialog).
 - **Branch**: current branch colored by its lamp, the upstream it tracks, ahead/behind counters (clicking pushes / pulls; pull is `--ff-only`).
 - **Branch list**: clicking the branch drops the list (Local / Remote groups); pick one or more to narrow the history to the commits their histories reach; nothing picked means every branch.

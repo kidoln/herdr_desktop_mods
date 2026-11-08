@@ -89,8 +89,12 @@ The Git panel (mod `git`), top to bottom:
   history to the commits those branches reach).
 - Commit box: "Message (Enter to commit)" placeholder; `Commit` (with
   nothing staged it stages everything — a smart commit; `Commit (n)` shows
-  the staged count) and `Commit & Push`, or a `Publish` button with no
-  upstream. Cmd/Ctrl+Enter commits.
+  the staged count) and `Pull & Push` — not a commit, so it works with an
+  empty message: pull `--rebase --autostash`, then push (a diverged branch
+  is replayed on the upstream's tip, a dirty tree is parked and restored; a
+  conflict stops the run, nothing pushed). With no upstream the row shows
+  `Publish`, and the button's push half publishes (-u) too. Cmd/Ctrl+Enter
+  commits.
 - `Staged Changes` / `Changes` groups (collapsible, with a group "discard
   all"): rows show the status letter (M/A/D/U/R/!), the path and `+n −m`;
   hovering reveals stage / unstage / discard buttons; the row of the file
@@ -319,9 +323,10 @@ The new mods:
   menu (popup 250) and `Create Branch…` (dialog 420×216), both closed with
   `closeOverlay(props().overlay)`. It commits with `-m` (or stages all
   first when nothing is staged), pushes (`git push` / `-u origin <branch>`
-  when publishing; `git push` otherwise), pulls `--ff-only`, discards a file
-  or `git restore`s a whole group (double-press / dialog), and inits with
-  `git init`.
+  when publishing; `git push` otherwise); the commit box's `Pull & Push`
+  pulls `--rebase --autostash` then pushes, while the branch row's pull
+  counter stays `--ff-only`; it discards a file or `git restore`s a whole
+  group (double-press / dialog), and inits with `git init`.
 - `git-diff` (≈350 lines): reads `shared("git.diff")`; fetches a byte-capped
   patch (`sh -c 'git ... "$@" | head -c 600000'`, falling back to plain
   `git`), turns unified lines into paired rows and a unified list
@@ -431,9 +436,11 @@ sets no fonts either.
    changed underneath is refused with an explanation; the Files panel's
    `file-view` pane does the same; rename from the Files menu repoints the
    open editor, delete clears it.
-5. Commit flow: `Commit` with nothing staged stages everything; `Commit &
-   Push` with no upstream shows `Publish`, which creates it; the history
-   shows the new commit and the branch row's `↑n` returns to 0 after a push.
+5. Commit flow: `Commit` with nothing staged stages everything; `Pull &
+   Push` works with an empty message (a real commit still needs one),
+   rebases a diverged branch and pushes (with no upstream it publishes
+   instead); `Publish` still creates the upstream; the history shows the
+   new commit and the branch row's `↑n` returns to 0 after a push.
 6. Branch flow: the status bar's branch lists the local branches and
    `git switch`es on pick (toast either way); the Git panel's branch
    dropdown narrows the history; the ahead/behind counters push / pull.
