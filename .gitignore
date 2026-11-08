@@ -1,0 +1,45 @@
+# Herdr 每次启动都会重写或还原的文件：不纳入版本管理。
+# Files Herdr rewrites or restores on every start.
+AGENTS.md
+*.d.ts
+frame/
+icons/
+themes/
+data/
+/update-notes.json
+/update-notes-cache.md
+/update-notes-media/
+*.error
+herdr-app.sock
+node_modules/
+.DS_Store
+
+# 窗口、会话与机器本地的状态记录。
+# Per-window and per-machine bookkeeping.
+/installed.json
+/seen.json
+/shared.json
+/view.json
+/window.json
+/windows.json
+
+# 个人偏好（缩放、字体、快捷键）。
+# Personal preferences (zoom, fonts, keybindings).
+/settings.json
+/keys.json
+
+# 布局：Herdr 自带 main / terminals / win98，只跟踪本项目自己的。
+# Layouts: Herdr ships main / terminals / win98; only this project's layout is tracked.
+/layouts/*
+!/layouts/herdr-git.json
+
+# Mod：Herdr 自带的那批会在启动时还原，只跟踪本项目自己的。
+# Mods: Herdr's own mods are restored on start; only this project's mods are tracked.
+/mods/*
+!/mods/agents-left/
+!/mods/file-view/
+!/mods/files-menu/
+!/mods/git/
+!/mods/git-diff/
+!/mods/status-branch/
+!/mods/tabs-git/
