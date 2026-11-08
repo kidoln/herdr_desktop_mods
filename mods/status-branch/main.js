@@ -1,9 +1,11 @@
 // The status bar (a copy of workspace-status) with a live branch item: pressing
 // the branch drops the repository's local branch list above the bar, and picking
 // one checks it out. The Git panel's branch row follows on its own folder watch.
+// It also shows the focused terminal's live folder (the space's, when the
+// focused pane is a mod), with the home folder shortened to "~".
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
-import { spaces, agents, panes, exec, notify, theme, run, window, keys } from "herdr";
+import { spaces, agents, panes, exec, focused, home, notify, theme, run, window, keys } from "herdr";
 
 // Where the active space is now: its first terminal's live folder, else where it
 // was made — the same place the bar's branch comes from.
@@ -11,6 +13,14 @@ function place(space) {
   if (!space) return null;
   const tabs = new Set((space.tabs ?? []).map((c) => c.id));
   return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || space.folder || null;
+}
+
+// "/Users/me/work/app" reads "~/work/app": shorter, and it says home at a glance.
+function short(path) {
+  const h = home();
+  if (!path || !h) return path ?? "";
+  if (path === h) return "~";
+  return path.startsWith(h + "/") ? "~" + path.slice(h.length) : path;
 }
 
 export default class StatusBranch extends View {
@@ -81,6 +91,9 @@ export default class StatusBranch extends View {
     const needs = list.filter(a => a.status === "blocked").length;
     const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13)).child(text);
     const branch = space?.branch;
+    // The focused terminal's folder, live; its space's folder when a mod pane
+    // holds the keyboard (focused().cwd is null then).
+    const cwd = focused()?.cwd ?? place(space);
     const trigger = (b) => h_flex().id("status-branch-trigger").h_full().px(6).gap(6).items_center().rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(this.open ? t.accent : t.muted))
@@ -92,6 +105,10 @@ export default class StatusBranch extends View {
           .on_open_change((open, cx) => { this.open = open; if (open) this.load(cx); cx.notify(); })
           .trigger(trigger(branch))
           .content(this.list(t))))
+      .when(Boolean(cwd), el => el.child(
+        h_flex().id("status-cwd").gap(6).items_center().min_w(0)
+          .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none())
+          .child(div().max_w(360).truncate().child(short(cwd)))))
       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
       .child(div().flex_1())
