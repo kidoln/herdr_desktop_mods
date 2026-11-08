@@ -29,6 +29,13 @@
 // once) as shared "git.counts", so the tab bar's Git button can carry a badge; with
 // no repository read, the count is zero and the badge goes.
 //
+// A running write reads so: the Commit and Pull & Push buttons turn their glyph
+// into a spinning arc while their command runs, and the ahead/behind counters and
+// Publish do the same, so a slow fetch reads as work rather than a dead button. A
+// write that fails puts git's own message in a strip along the panel's bottom edge,
+// and the strip's X takes it down -- Escape too, and the next write replaces it --
+// so a refusal no longer waits for a change of folder to clear.
+//
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane in the main area — side by side, or a single
 // green (new file) / red (deleted file) column when there is no other side to pair.
@@ -69,6 +76,8 @@ const ctxKey = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/git/${name}.svg`).flex_none();
+// The working state of a button: a ring with an arc that turns once every 900 ms.
+const spinner = () => svg("mods/git/spinner.svg").flex_none().spin(900);
 
 // One lamp color per ref, stable across reloads and repos: the same name always
 // hashes to the same palette entry, and a name whose lamp is taken probes onward,
@@ -283,7 +292,7 @@ export default class Git extends View {
     const saved = Number(localStorage.getItem("logHeight"));
     this.logHeight = Number.isFinite(saved) && saved >= 72 ? Math.min(saved, 900) : 190;
     this.resize = null; this.size = null; this.unit = 1;
-    this.message = ""; this.note = null; this.error = null;
+    this.message = ""; this.note = null; this.error = null; this.task = null;
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
     this.input.on("change", (_e, cx) => { this.message = this.input.value(); cx.notify(); });
@@ -608,14 +617,17 @@ export default class Git extends View {
   closeCommit(cx) { this.commitView = null; cx.notify(); }
 
   // Every write goes through here: one at a time, then a refresh, errors inline.
-  mutate(cx, fn) {
+  // `task` names the write for the buttons that show it running (the sync
+  // button's arc, the ahead/behind counters, Publish); null means no button
+  // does.
+  mutate(cx, fn, task) {
     if (this.busy || !this.root) return;
     const root = this.root, on = this.on, context = this.context;
-    this.busy = true; this.note = null; cx.notify();
+    this.busy = true; this.task = task ?? null; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try { await fn(root, on); }
       catch (e) { if (ctxKey() === context) this.note = String(e); }
-      finally { this.busy = false; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
+      finally { this.busy = false; this.task = null; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
     });
   }
 
@@ -682,10 +694,10 @@ export default class Git extends View {
       if (stageFirst) this.fail(await this.git(root, on, ["add", "-A"]));
       this.fail(await this.git(root, on, ["commit", "-m", message]), "Commit failed");
       this.message = ""; this.input.set_value("");
-    });
+    }, "commit");
   }
-  push(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, this.pushArgs()))); }
-  pull(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, ["pull", "--ff-only"]))); }
+  push(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, this.pushArgs())), "push"); }
+  pull(cx) { this.mutate(cx, async (root, on) => this.fail(await this.git(root, on, ["pull", "--ff-only"])), "pull"); }
   // The commit box's sync button: pull, then push. The pull rebases, so a branch
   // that has diverged from its upstream is replayed on the upstream's tip
   // instead of stopping at git's "how to reconcile" refusal (a plain pull or
@@ -699,7 +711,7 @@ export default class Git extends View {
     this.mutate(cx, async (root, on) => {
       if (this.upstream) this.fail(await this.git(root, on, ["pull", "--rebase", "--autostash"]), "Pull failed");
       this.fail(await this.git(root, on, this.pushArgs()), "Push failed");
-    });
+    }, "sync");
   }
 
   key(e, cx) {
@@ -708,6 +720,7 @@ export default class Git extends View {
       else if (this.typing) { this.typing = false; this.handle.focus(); }
       else if (this.branchPick) { this.branchPick = false; }
       else if (this.commitView) { this.commitView = null; }
+      else if (this.note) { this.note = null; }
       else return;
       cx.stop_propagation(); cx.notify();
     } else if (e.keystroke === "cmd-enter" || e.keystroke === "ctrl-enter") {
@@ -864,11 +877,14 @@ export default class Git extends View {
 
   branchRow(t) {
     if (!this.root || !this.branch) return null;
-    const counter = (id, name, count, onClick) =>
+    // The ahead/behind counters run the same push/pull the sync button does, and
+    // show the same turning arc while theirs runs, so the press's write is
+    // visible here too (the count stays beside the arc until it lands).
+    const counter = (id, name, count, onClick, running) =>
       h_flex().id(id).h(22).px(6).gap(3).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
-        .child(icon(name).size(12).text_color(t.accent))
+        .child(running ? spinner().size(12).text_color(t.accent) : icon(name).size(12).text_color(t.accent))
         .when(count > 0, (e) => e.child(div().text_size(11).text_color(t.accent).child(String(count))));
     const picked = this.picked.size, total = this.localRefs.length + this.remoteRefs.length;
     // The branch itself is the button of the branch list: one press drops the
@@ -896,10 +912,12 @@ export default class Git extends View {
         h_flex().id("git-publish").h(22).px(8).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => { cx.stop_propagation(); this.push(cx); })
-          .child(icon("arrow-up").size(12).text_color(t.accent))
+          .child(this.busy && this.task === "push"
+            ? spinner().size(12).text_color(t.accent)
+            : icon("arrow-up").size(12).text_color(t.accent))
           .child(div().text_size(11).text_color(t.accent).child("Publish"))))
-      .when(this.upstream && this.behind > 0, (e) => e.child(counter("git-pull", "arrow-down", this.behind, (cx) => this.pull(cx))))
-      .when(this.upstream && this.ahead > 0, (e) => e.child(counter("git-push", "arrow-up", this.ahead, (cx) => this.push(cx))));
+      .when(this.upstream && this.behind > 0, (e) => e.child(counter("git-pull", "arrow-down", this.behind, (cx) => this.pull(cx), this.busy && this.task === "pull")))
+      .when(this.upstream && this.ahead > 0, (e) => e.child(counter("git-push", "arrow-up", this.ahead, (cx) => this.push(cx), this.busy && this.task === "push")));
   }
 
   // The branch list itself: the Popup's content under the branch row. Every
@@ -945,23 +963,31 @@ export default class Git extends View {
     const sync = Boolean(this.root && !this.busy);
     const count = this.staged.length;
     const label = count > 0 ? `Commit (${count})` : this.unstaged.length > 0 ? "Commit All" : "Commit";
-    const button = (id, name, text, primary, enabled, onClick) =>
-      h_flex().id(id).flex_1().min_w(0).h(30).items_center().justify_center().gap(6).rounded(8)
-        .bg(primary ? (enabled ? t.solid : t.raised) : t.raised)
-        .text_color(primary ? (enabled ? t.solid_foreground : t.dim) : enabled ? t.foreground : t.dim)
+    // The button reads three ways: disabled (dim, no pointer), armed, and
+    // running -- `running` keeps the armed colors while the busy flag has already
+    // taken `enabled` away, and swaps the glyph for the turning arc, so the press
+    // visibly did something from the first frame.
+    const button = (id, name, text, primary, enabled, onClick, running) => {
+      const live = enabled || running;
+      return h_flex().id(id).flex_1().min_w(0).h(30).items_center().justify_center().gap(6).rounded(8)
+        .bg(primary ? (live ? t.solid : t.raised) : t.raised)
+        .text_color(primary ? (live ? t.solid_foreground : t.dim) : live ? t.foreground : t.dim)
         .text_size(12).when(enabled, (e) => e.cursor_pointer())
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); if (enabled) onClick(cx); })
-        .child(icon(name).size(14).text_color(primary ? (enabled ? t.solid_foreground : t.dim) : t.muted))
+        .child(running
+          ? spinner().size(14).text_color(primary ? t.solid_foreground : t.accent)
+          : icon(name).size(14).text_color(primary ? (enabled ? t.solid_foreground : t.dim) : t.muted))
         .child(div().truncate().child(text));
+    };
     return v_flex().flex_none().p(10).gap(8).border_b(1).border_color(t.border)
       .child(div().id("git-message").w_full().min_h(32).px(10).py(6).flex().items_center().rounded(8).border_1()
         .border_color(this.typing ? t.accent : t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .child(Input.new(this.input).w_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().gap(8).items_center()
-        .child(button("git-commit", "check", label, true, ready, (cx) => this.commit(cx)))
-        .child(button("git-pull-push", "pull-push", "Pull & Push", false, sync, (cx) => this.pullPush(cx))));
+        .child(button("git-commit", "check", label, true, ready, (cx) => this.commit(cx), this.busy && this.task === "commit"))
+        .child(button("git-pull-push", "pull-push", "Pull & Push", false, sync, (cx) => this.pullPush(cx), this.busy && this.task === "sync")));
   }
 
   sectionRow(t, r) {
@@ -1342,6 +1368,23 @@ export default class Git extends View {
         .when(c.files.length > files.length, (e) => e.child(div().p(6).text_size(11).text_color(t.dim).child(`\u2026 and ${c.files.length - files.length} more`))));
   }
 
+  // What a failed write left behind, along the panel's bottom edge: git's own
+  // message, with the X that takes it down. Escape takes it down too (see key),
+  // and the next write replaces it, so the strip never outlives its value. The
+  // text scrolls at a cap rather than growing: a merge conflict's list can be
+  // long, and the lists above it must keep their room.
+  noteBar(t) {
+    return h_flex().id("git-note").flex_none().px(10).py(6).gap(6).items_start()
+      .bg(t.raised).border_t(1).border_color(t.border)
+      .child(div().flex_1().min_w(0).max_h(90).overflow_y_scrollbar().text_size(11).text_color(t.ansi1).child(this.note))
+      .child(div().id("git-note-close").w(18).h(18).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .tooltip("Dismiss")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.note = null; cx.notify(); })
+        .child(icon("close").size(12).text_color(t.muted)));
+  }
+
   render(cx) {
     if (props()?.commitMenu) return this.commitMenuView(theme(), props().commitMenu);
     if (props()?.createBranch) return this.branchDialogView(theme(), props().createBranch);
@@ -1398,6 +1441,6 @@ export default class Git extends View {
       .when(!this.root, (e) => e.child(this.emptyState(t)))
       .when(Boolean(this.root), (e) => e.child(body))
       .when(Boolean(this.root), (e) => e.child(this.historySection(t)))
-      .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).text_size(11).text_color(t.ansi1).child(this.note)));
+      .when(Boolean(this.note), (e) => e.child(this.noteBar(t)));
   }
 }
