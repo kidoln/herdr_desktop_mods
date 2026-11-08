@@ -1,4 +1,4 @@
-// Agents in grouped or priority views; parents take their most urgent sub-agent's place.
+// Agents in priority, grouped or urgent-space views; parents take their most urgent sub-agent's place.
 // A viewed done agent stays in Done until left.
 
 import { View, div, image, svg } from "gpui-kit";
@@ -53,9 +53,12 @@ const kidStatus = (k, listed) => {
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
 const SORTS = [
-  { id: "priority", label: "Priority", icon: "clock" },
-  { id: "grouped", label: "Grouped by space", icon: "layers" },
+  { id: "priority", label: "Priority", icon: "mods/workspace-chrome/clock.svg" },
+  { id: "grouped", label: "Grouped by space", icon: "mods/workspace-chrome/layers.svg" },
+  { id: "urgent", label: "Urgent spaces first", icon: "mods/agents-left/flame.svg" },
 ];
+// Urgent spaces first: blocked, then working, then done, the rest last.
+const TIER = { [RANK.blocked]: 0, [RANK.working]: 1, [RANK.done]: 2 };
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
@@ -141,6 +144,27 @@ export default class Agents extends View {
     return sawDone ? RANK.done : RANK[a.status] ?? 0;
   }
 
+  // Urgent spaces first: still grouped by space, but the spaces move by what
+  // their agents need — blocked, then working, then done, the rest — freshest
+  // first within a rank; agents inside a space keep urgency order.
+  bySpaceUrgency(list, rankOf) {
+    const info = new Map();
+    list.forEach((a, i) => {
+      const g = info.get(a.space) ?? { top: 0, at: 0, i };
+      g.top = Math.max(g.top, rankOf(a));
+      g.at = Math.max(g.at, this.since(a));
+      info.set(a.space, g);
+    });
+    const place = new Map([...info.entries()]
+      .sort(([, x], [, y]) => (TIER[x.top] ?? 3) - (TIER[y.top] ?? 3) || y.at - x.at || x.i - y.i)
+      .map(([id], i) => [id, i]));
+    return [...list].sort((x, y) =>
+      place.get(x.space) - place.get(y.space) ||
+      rankOf(y) - rankOf(x) ||
+      this.since(y) - this.since(x) ||
+      y.seq - x.seq);
+  }
+
   sortMenu(t) {
     const on = sortOf().id;
     return v_flex()
@@ -162,7 +186,7 @@ export default class Agents extends View {
           setShared("agents.sort", s.id);
           closeOverlay(props().overlay);
         })
-        .child(svg(`mods/workspace-chrome/${s.icon}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(svg(s.icon).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().child(s.label))
         .when(s.id === on, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
   }
@@ -234,11 +258,13 @@ export default class Agents extends View {
     this.track(list, now);
     this.hold(list);
     const byPriority = sort.id === "priority";
+    const byUrgency = sort.id === "urgent";
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
-    const rest = list.filter((a) => !a.pinned);
+    let rest = list.filter((a) => !a.pinned);
+    if (byUrgency) rest = this.bySpaceUrgency(rest, rankOf);
     list = [...pinned, ...rest];
     setAgentOrder(list.map((a) => a.address));
 
@@ -375,6 +401,11 @@ export default class Agents extends View {
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
     }
+    // Urgent spaces: the header says which space needs what, so the order reads.
+    if (byUrgency) for (const g of groups) {
+      if (g.id === "pinned") continue;
+      g.status = SECTION_STATUS[g.members.reduce((m, a) => Math.max(m, rankOf(a)), 0)] ?? null;
+    }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
@@ -397,7 +428,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
-        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || byUrgency || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
@@ -431,9 +462,9 @@ export default class Agents extends View {
                 .text_size(11)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
-                .on_click(() => openOverlay({ mod: "agents-left", kind: "popup", width: 200, height: 140, props: { sortMenu: true } }))
+                .on_click(() => openOverlay({ mod: "agents-left", kind: "popup", width: 200, height: 171, props: { sortMenu: true } }))
                 .tooltip(`Sort agents: ${sort.label}`)
-                .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)),
+                .child(svg(sort.icon).size(14)),
             ),
         ),
       )
