@@ -6,6 +6,8 @@
 
 [中文](#zh) · [English](#en)
 
+![Herdr Git 工作台](preview.png)
+
 ---
 
 <a id="zh"></a>
