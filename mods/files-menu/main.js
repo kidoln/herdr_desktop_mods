@@ -13,7 +13,8 @@
 // " copy" (a name a cut brings along gets " 2") so nothing is overwritten.
 // The same mod draws that menu and the three dialogs (rename, new, delete
 // confirmation): overlay copies opened with props {fileMenu}, {renameOp},
-// {newOp} and {confirmDelete}.
+// {newOp} and {confirmDelete}. Each row carries a type icon: one glyph and
+// theme color per kind of file (see FILE_TYPES below), a folder its chevron.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, window, props, openOverlay, closeOverlay, notify, run, shared, setShared } from "herdr";
@@ -37,6 +38,66 @@ const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const baseOf = (p) => (p.includes("/") ? p.slice(p.lastIndexOf("/") + 1) : p);
 const splitExt = (name) => { const dot = name.lastIndexOf("."); return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""]; };
 const items = (n) => `${n} item${n === 1 ? "" : "s"}`;
+
+// ---- file type icons ----
+// Each kind of file gets its own icon and color; a name the table below does
+// not know falls back to the plain file. The icons live beside this mod,
+// drawn in the same 24px stroke style as folder.svg. Colors are theme names,
+// so they follow the theme and its light or dark appearance.
+const FILE_TYPES = [
+  // [icon, color, extensions] -- first match wins.
+  ["file-md", "ansi4", "md mdx markdown"],
+  ["file-json", "ansi3", "json jsonc json5 webmanifest"],
+  ["file-lock", "dim", "lock"],
+  ["file-config", "ansi5", "yaml yml toml ini cfg conf config properties env"],
+  ["file-style", "ansi4", "css scss sass less styl"],
+  ["file-text", "ansi1", "pdf"],
+  ["file-text", "ansi4", "doc docx odt rtf pages"],
+  ["file-text", "ansi2", "xls xlsx ods numbers csv tsv"],
+  ["file-text", "ansi3", "ppt pptx odp key"],
+  ["file-text", "muted", "txt log text"],
+  ["terminal", "ansi2", "sh bash zsh fish ksh csh tcsh dash mksh"],
+  ["terminal", "ansi4", "ps1 psm1 bat cmd"],
+  ["database", "ansi4", "sql db sqlite sqlite3"],
+  ["image", "ansi5", "png jpg jpeg gif webp bmp ico icns tif tiff svg heic avif"],
+  ["film", "ansi4", "mp4 mov mkv webm avi wmv flv m4v mpg mpeg"],
+  ["music", "ansi6", "mp3 wav flac ogg m4a aac opus mid midi"],
+  ["archive", "ansi3", "zip tar gz bz2 xz 7z rar zst tgz"],
+  ["file-code", "ansi4", "ts tsx mts cts c h cc cpp cxx hpp hh mm java cs go rs swift kt kts scala lua zig dart xml"],
+  ["file-code", "ansi3", "js jsx mjs cjs"],
+  ["file-code", "ansi6", "py pyw pyi rb pl pm php r jl ex exs erl hr hs ml clj"],
+  ["file-code", "ansi1", "html htm xhtml svelte"],
+  ["file-code", "ansi2", "vue astro"],
+].flatMap(([icon, color, exts]) => exts.split(" ").map(ext => ({ ext, icon, color })));
+const FILE_TYPE_BY_EXT = new Map(FILE_TYPES.map(({ ext, icon, color }) => [ext, { icon, color }]));
+// Names without an extension, or where the name says more than one would.
+const FILE_TYPE_BY_NAME = new Map([
+  ["gnumakefile", { icon: "file-config", color: "ansi3" }],
+  ["cmakelists.txt", { icon: "file-config", color: "ansi4" }],
+  ["license", { icon: "file-text", color: "ansi3" }],
+  ["licence", { icon: "file-text", color: "ansi3" }],
+  ["notice", { icon: "file-text", color: "muted" }],
+  ["authors", { icon: "file-text", color: "muted" }],
+  ["readme", { icon: "file-text", color: "ansi4" }],
+  [".gitignore", { icon: "file-config", color: "ansi1" }],
+  [".gitattributes", { icon: "file-config", color: "ansi1" }],
+  [".gitmodules", { icon: "file-config", color: "ansi1" }],
+  [".editorconfig", { icon: "file-config", color: "ansi5" }],
+  [".zshrc", { icon: "terminal", color: "ansi2" }],
+  [".bashrc", { icon: "terminal", color: "ansi2" }],
+  [".profile", { icon: "terminal", color: "ansi2" }],
+]);
+
+// The icon and color one entry's name resolves to, against the given theme.
+function fileIcon(name, t) {
+  const lower = name.toLowerCase(), dot = lower.lastIndexOf(".");
+  const found = FILE_TYPE_BY_NAME.get(lower)
+    ?? (lower.startsWith("dockerfile") ? { icon: "file-config", color: "ansi4" }
+      : lower.startsWith("makefile") ? { icon: "file-config", color: "ansi3" }
+        : lower.startsWith(".env") ? { icon: "file-config", color: "ansi3" }
+          : FILE_TYPE_BY_EXT.get(dot >= 0 ? lower.slice(dot + 1) : ""));
+  return { file: `mods/files-menu/${found?.icon ?? "file"}.svg`, color: t[found?.color ?? "muted"] ?? t.muted };
+}
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -567,9 +628,12 @@ export default class Files extends View {
 
   deleteView(t, d) {
     const close = () => closeOverlay(props().overlay);
-    const rows = d.entries.slice(0, 7).map((e) => h_flex().h(18).gap(7).items_center()
-      .child(svg(`mods/files-menu/${e.dir ? "folder" : "file"}.svg`).size(12).flex_none().text_color(t.muted))
-      .child(div().flex_1().min_w(0).truncate().text_size(12).child(e.name)));
+    const rows = d.entries.slice(0, 7).map((e) => {
+      const ico = e.dir ? null : fileIcon(e.name, t);
+      return h_flex().h(18).gap(7).items_center()
+        .child(svg(ico?.file ?? "mods/files-menu/folder.svg").size(12).flex_none().text_color(ico?.color ?? t.muted))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).child(e.name));
+    });
     return v_flex().id("files-delete").size_full().track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape") { cx.stop_propagation(); close(); }
@@ -621,6 +685,7 @@ export default class Files extends View {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(rel), mark = this.marks[`${this.root}/${rel}`];
       const selected = this.selected.has(rel);
       const opened = !entry.dir && shown?.path === rel && shown.root === this.root;
+      const ico = entry.dir ? null : fileIcon(entry.name, t);
       this.order.push(rel);
       out.push(h_flex().id(`file-${rel}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer()
         .when(selected, el => el.bg(t.selected))
@@ -628,7 +693,7 @@ export default class Files extends View {
         .on_click((e, cx) => { cx.stop_propagation(); this.clickRow(rel, entry, e, cx); })
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.menu(rel, entry); })
         .child(entry.dir ? svg(`mods/files-menu/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-        .child(svg(`mods/files-menu/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(opened ? t.accent : t.muted))
+        .child(svg(ico?.file ?? "mods/files-menu/folder.svg").size(14).flex_none().text_color(opened ? t.accent : ico?.color ?? t.muted))
         .child(div().flex_1().min_w(0).truncate().when(opened, el => el.text_color(t.accent)).child(entry.name))
         .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
       if (entry.dir && open) this.rows(rel, depth + 1, out, t, shown);
