@@ -57,8 +57,8 @@ const SORTS = [
   { id: "grouped", label: "Grouped by space", icon: "mods/workspace-chrome/layers.svg" },
   { id: "urgent", label: "Urgent spaces first", icon: "mods/agents-left/flame.svg" },
 ];
-// Urgent spaces first: blocked, then working, then done, the rest last.
-const TIER = { [RANK.blocked]: 0, [RANK.working]: 1, [RANK.done]: 2 };
+// Urgent spaces first: blocked, then done, then working, the rest last.
+const TIER = { [RANK.blocked]: 0, [RANK.done]: 1, [RANK.working]: 2 };
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
@@ -145,7 +145,7 @@ export default class Agents extends View {
   }
 
   // Urgent spaces first: still grouped by space, but the spaces move by what
-  // their agents need — blocked, then working, then done, the rest — freshest
+  // their agents need — blocked, then done, then working, the rest — freshest
   // first within a rank; agents inside a space keep urgency order.
   bySpaceUrgency(list, rankOf) {
     const info = new Map();
