@@ -296,28 +296,36 @@ export default class Git extends View {
     });
   }
 
+  // An empty panel: no folder, or no repository there yet.
+  clear() {
+    this.root = null; this.on = null; this.hasHead = false; this.headSha = null;
+    this.files = []; this.staged = []; this.unstaged = []; this.commits = []; this._graph = null;
+    this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0;
+    this.remotes = null; this.lamps = null; this.localRefs = []; this.remoteRefs = [];
+    this.commitView = null; this.branchPick = false; this.picked = new Set();
+    this.resize = null; this.confirm = null; this.confirmAll = false; this.hovered = null;
+    this.error = null; this.notRepo = false; this.note = null; this.limited = false;
+  }
+
   refresh(cx) {
     if (this.loading || this.busy) return;
     const { cwd, on } = location(), context = ctxKey();
     if (context !== this.context) {
-      this.context = context; this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-      this.commitView = null;
-      this.message = ""; this.input.set_value("");
-      this.error = null; this.notRepo = false; this.note = null; this.watched = null; this.hasHead = false; this.headSha = null;
-      this.branch = null; this.upstream = null; this.ahead = 0; this.behind = 0; this.remotes = null; this.lamps = null;
-      this.localRefs = []; this.remoteRefs = []; this.branchPick = false; this.picked = new Set(); this.resize = null;
-      this.confirm = null; this.confirmAll = false; this.hovered = null; this.limited = false;
+      // The folder the panel follows changed. The read below replaces what is on
+      // screen in one step; clearing first would flash the empty state for the
+      // length of the read (and a `cd` inside one repository, which changes
+      // nothing the panel shows, would flash too).
+      this.context = context;
+      this.watched = null;   // the old folder's watch loop ends by itself
+      this.resize = null;    // a drag belongs to the panel that was on screen
     }
-    if (!cwd) return;
+    if (!cwd) { this.clear(); return; }
     this.loading = true;
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (ctxKey() !== context) return;
-        if (top.code !== 0) {
-          this.root = null; this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
-          this.commitView = null; this.error = "Not a git repository"; this.notRepo = true; return;
-        }
+        if (top.code !== 0) { this.clear(); this.error = "Not a git repository"; this.notRepo = true; return; }
         const root = top.stdout.trim();
         const g = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const head = await g(["rev-parse", "--verify", "HEAD"]);
@@ -432,6 +440,15 @@ export default class Git extends View {
             unstaged: untracked || conflict || (y !== " " && y !== "?") });
         }
         if (ctxKey() !== context) return;
+        // A different repository: what belonged to the old one (a typed message, an
+        // open commit, the branch picker, picked refs, a discard confirmation) goes
+        // with it, in the same step as the new data, so the two are never mixed.
+        // A `cd` inside one repository changes none of it and keeps all of it.
+        if (this.root !== root) {
+          this.commitView = null; this.branchPick = false; this.picked = new Set();
+          this.message = ""; this.input.set_value("");
+          this.confirm = null; this.confirmAll = false; this.hovered = null; this.note = null;
+        }
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.headSha = head.code === 0 ? head.stdout.trim() : null;
         this.branch = branch; this.upstream = upstream; this.ahead = ahead; this.behind = behind;
         this.remotes = remotes; this.lamps = lamps;
