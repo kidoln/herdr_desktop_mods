@@ -2,9 +2,9 @@
 
 A set of custom Herdr mods plus a window layout (named `herdr-git`) that
 assembles them: a Git-centered workspace — the left sidebar keeps spaces and
-agents, the right sidebar is a stack of Files / Changes / a VS Code-shaped Git
+agents, the right sidebar is a stack of Files / a VS Code-shaped Git
 panel (commit box, staged and changed files, the branch with its upstream, a
-commit graph), the tab bar carries Files / Changes / Git buttons, the status
+commit graph), the tab bar carries Files / Git buttons, the status
 bar's branch is a button — and beyond Git: a fuller file manager (selection,
 context menu, rename/copy/paste/delete), an agents list led by each row's
 status, and the reworked tab bar and status bar. The main area shows terminal
@@ -13,8 +13,8 @@ panes, with diffs and file editing opening in the tab as panes of their own.
 ![Herdr Desktop Mods](preview.png)
 
 The preview shows a demo repository (`main`, one commit ahead of `origin/main`,
-one staged file, two changed, one untracked), the `opencode` agent in the top
-pane, and the diff pane comparing `src/server.ts` below.
+one staged file, two changed, one untracked), the `opencode` agent in the left
+pane, and the diff pane comparing `src/server.ts` beside it.
 
 Package shape: `layouts/herdr-git.json` plus the seven `mods/` folders it
 uses. It mirrors a Herdr config folder (default `~/.config/herdr-app/`): copy
@@ -59,9 +59,9 @@ Work column:
   1 px `border` when active; the program's icon and name, `Z` when zoomed,
   a spinner while its agent works, a red/green dot for blocked/done, a close
   X on the active pill); a `+` button (shipped `new-menu` popup). Right:
-  `Files` / `Changes` / `Git` buttons (`selected` when its panel shows; icons
-  `mods/files/file.svg`, `mods/changes/changes.svg`, `mods/git/git.svg`),
-  and on Windows min/max/close window buttons (`mods/tabs-git/win-*.svg`).
+  `Files` / `Git` buttons (`selected` when its panel shows; icons
+  `mods/files/file.svg`, `mods/git/git.svg`), and on Windows min/max/close
+  window buttons (`mods/tabs-git/win-*.svg`).
   On macOS the left padding grows so the traffic lights never overlap a tab.
 - Main area — the block `main`, `content: {tab: "active"}`: the active tab's
   terminals as cards. 8 px padding around the row, 8 px gap between panes,
@@ -72,9 +72,9 @@ Work column:
   on the right. Terminal text uses the mono font from settings (JetBrains
   Mono here), `terminal_padding [14, 12]`.
 - Right panel — 368 px by default (min 280, max 900; the preview: 392): one
-  stack, `panel-body`, holding three blocks — `files-menu`, `changes`
-  (shipped), `git` — one shown at a time; the layout's default child is
-  `git`. The tab bar's buttons switch it, or hide the whole column.
+  stack, `panel-body`, holding two blocks — `files-menu` and `git` — one
+  shown at a time; the layout's default child is `git`. The tab bar's
+  buttons switch it, or hide the whole column.
 - Status bar, 28 px (mod `status-branch`, a fork of the shipped
   `workspace-status`), background `chrome`, top `border`: "This computer"
   (a server icon on a remote space), the branch as a button, "N agents ·
@@ -202,8 +202,8 @@ What moves, what is remembered:
 
 Watching the folder:
 
-- The Git panel, Files panel and the shipped Changes panel watch the focused
-  folder with `watchFolder` and a 10 s timer fallback; every git read uses
+- The Git panel and the Files panel watch the focused folder with
+  `watchFolder` and a 10 s timer fallback; every git read uses
   `--no-optional-locks -c core.fsmonitor=false -c diff.autoRefreshIndex=false`
   so the watch never sees our own reads. The diff pane reads only when its
   target changes (or a save reloads it) — it is not a watcher.
@@ -245,7 +245,6 @@ ids:
           "children": [
             { "id": "panel-body", "type": "stack", "active": "git", "children": [
               { "id": "files", "content": {"mod": "files-menu"} },
-              { "id": "changes", "content": {"mod": "changes"} },
               { "id": "git", "content": {"mod": "git"} } ] } ] } ] },
       { "id": "status", "size": {"px": 28}, "content": {"mod": "status-branch"} } ] } ] }
 ```
@@ -261,7 +260,7 @@ puts them somewhere):
 | `files-menu` | fork of `files` | multi-select, context menu, rename/copy/paste/delete, git marks |
 | `status-branch` | fork of `workspace-status` | the branch button in the status bar |
 | `agents-left` | fork of `agents` | the status chip leading each agent row |
-| `tabs-git` | fork of `tabs` | Files / Changes / Git panel buttons |
+| `tabs-git` | fork of `tabs` | Files / Git panel buttons |
 
 The forks are clones (`mod.clone`), so each carries
 `cloned_from: {name, version: "0.1.13"}` in its `mod.json`; build them by
@@ -297,16 +296,16 @@ shipped folder does not survive) and then:
   hint is derived from `keys()` (falls back to the bare word "commands");
   the folder is the active space's first terminal's live `cwd` (or the space
   folder), the same place the bar's branch comes from.
-- `tabs-git` — `tabs` plus the three panel buttons and the per-space panel
-  memory: `localStorage` "panels" maps space id → `"files" | "changes" |
-  "git" | null`; on a space switch it applies the stored choice with
+- `tabs-git` — `tabs` plus the two panel buttons and the per-space panel
+  memory: `localStorage` "panels" maps space id → `"files" | "git" | null`;
+  on a space switch it applies the stored choice with
   `layout.select {stack: "panel-body", child}` + `layout.show|hide {id:
   "panel"}` (a space with no memory starts hidden); manual changes are
   recorded back. The enabled set is `shared("workspace.panels")` plus
-  `"git"` — the Git button is always offered. It also pads the tab strip for
-  the macOS traffic lights using the layout's `traffic_lights` and the
-  sidebar width (divided by zoom), and draws Windows window buttons when
-  `window().buttons`.
+  `"git"`, kept to what the stack holds — the Git button is always offered.
+  It also pads the tab strip for the macOS traffic lights using the
+  layout's `traffic_lights` and the sidebar width (divided by zoom), and
+  draws Windows window buttons when `window().buttons`.
 
 The new mods:
 
@@ -352,7 +351,7 @@ Shared state contract (set by `setShared`, read with `shared`):
 - `files.refresh` = a growing number; the panels re-read the folder when it
   changes.
 - `workspace.panels` (read-only here) = the set of panels the welcome
-  enabled; `tabs-git` offers those plus `git`.
+  enabled; `tabs-git` offers those its stack holds, plus `git`.
 
 Commands the mods run: `pane.split` / `pane.close` (the two "open a pane"
 flows), `pane.focus`, `terminal.peek` / `terminal.pin`, `tab.select` /
@@ -373,7 +372,7 @@ plus, refresh, tag, undo), `mods/git-diff/*.svg` (chevron-left, disk, pencil),
 file,folder}.svg`, `mods/tabs-git/win-{close,max,min,restore}.svg`. The forks
 also reference shipped assets on purpose: `mods/workspace-chrome/
 {spinner,branch,check,monitor,server}.svg`, `mods/pane/close.svg`,
-`mods/files/file.svg`, `mods/changes/changes.svg`. The commit graph is drawn
+`mods/files/file.svg`. The commit graph is drawn
 with `PathBuilder`, no images; the diff's red/green are literal hexes (above)
 because theme ANSI colors wash out at row alpha. No fonts are bundled — the
 mods use `settings().font_family` (JetBrains Mono by default); the layout
@@ -388,7 +387,7 @@ sets no fonts either.
   live in `layouts/.state/` and override the JSON on this machine; a fresh
   install starts from the JSON defaults (268 / 368, stack `git`).
 - The forks depend on shipped assets and shipped mods (`menu`, `new-menu`,
-  `pane`, `changes`, `spaces`, `workspace-chrome`). A build that ships its
+  `pane`, `spaces`, `workspace-chrome`). A build that ships its
   own copies must fix the asset paths and the overlay mod names.
 - The Git panel and the Files panel anchor their splits on the focused
   terminal's pane — or the tab's first terminal when a mod pane holds the
@@ -425,7 +424,7 @@ sets no fonts either.
 1. `herdr-app check ~/.config/herdr-app/mods/<each of the seven>` passes
    (loads, renders once, exits 0).
 2. `layout.switch {name: "herdr-git"}` shows the window: brand bar, spaces
-   and agents, tab bar with the three panel buttons, main panes with 30 px
+   and agents, tab bar with the two panel buttons, main panes with 30 px
    headers, right stack (default: Git), status bar with the branch.
 3. In a repository: the Git panel lists staged/changed files with letters
    and `+n −m`; clicking a file opens the diff pane side by side, the row

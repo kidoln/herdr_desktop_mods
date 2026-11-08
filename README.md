@@ -30,9 +30,9 @@
 | 区域 | 内容 |
 |---|---|
 | 左侧栏 | 空间列表、Agents 列表（`agents-left`）、底部工具条 |
-| 顶部 | 标签栏（`tabs-git`）：标签 + Files / Changes / Git 面板开关 |
+| 顶部 | 标签栏（`tabs-git`）：标签 + Files / Git 面板开关 |
 | 主区 | 终端 / diff / 编辑器面板平铺，面板带常显的标题栏 |
-| 右侧栏 | Files / Changes / Git 面板轮换（`files-menu`、`changes`、`git`） |
+| 右侧栏 | Files / Git 面板轮换（`files-menu`、`git`） |
 | 底部 | 状态栏（`status-branch`）：分支可直接点开切换 |
 
 ### 7 个 mod
@@ -45,7 +45,7 @@
 | `files-menu` | 基于自带 `files` 改编 | 文件浏览器：多选、右键菜单、重命名/复制/粘贴/删除、Git 状态标记 |
 | `status-branch` | 基于自带 `workspace-status` 改编 | 状态栏上的分支切换按钮 |
 | `agents-left` | 基于自带 `agents` 改编 | 状态图标前置的 Agents 列表 |
-| `tabs-git` | 基于自带 `tabs` 改编 | 标签栏上的 Files / Changes / Git 面板开关 |
+| `tabs-git` | 基于自带 `tabs` 改编 | 标签栏上的 Files / Git 面板开关 |
 
 #### `git` — 源代码管理面板
 
@@ -92,7 +92,7 @@
 
 #### `tabs-git` — 标签栏
 
-- 自带 `tabs` 加上 Files / Changes / Git 三个面板开关：点击切换右侧面板栈，点当前面板则收起；Git 在这里始终可用，并按空间记住上次的面板选择。
+- 自带 `tabs` 加上 Files / Git 两个面板开关：点击切换右侧面板栈，点当前面板则收起；Git 在这里始终可用，并按空间记住上次的面板选择。
 
 ### 它们如何协作
 
@@ -160,9 +160,9 @@ The window looks like this:
 | Area | Content |
 |---|---|
 | Left sidebar | Spaces list, agents list (`agents-left`), footer toolbar |
-| Top | Tab bar (`tabs-git`): tabs + Files / Changes / Git panel buttons |
+| Top | Tab bar (`tabs-git`): tabs + Files / Git panel buttons |
 | Main area | Terminal / diff / editor panes; every pane keeps a header |
-| Right panel | Files / Changes / Git stack (`files-menu`, `changes`, `git`) |
+| Right panel | Files / Git stack (`files-menu`, `git`) |
 | Bottom | Status bar (`status-branch`): click the branch to switch |
 
 ### The seven mods
@@ -175,7 +175,7 @@ The window looks like this:
 | `files-menu` | fork of `files` | File browser: selection, context menu, rename/copy/paste/delete, Git marks |
 | `status-branch` | fork of `workspace-status` | Branch switcher in the status bar |
 | `agents-left` | fork of `agents` | Agents list with the status chip leading each row |
-| `tabs-git` | fork of `tabs` | Files / Changes / Git panel buttons in the tab bar |
+| `tabs-git` | fork of `tabs` | Files / Git panel buttons in the tab bar |
 
 #### `git` — the Source Control panel
 
@@ -222,7 +222,7 @@ The window looks like this:
 
 #### `tabs-git` — the tab bar
 
-- The shipped tab bar plus Files / Changes / Git panel buttons: clicking one switches the right panel stack, clicking the shown one hides it; Git is always offered here, and the choice is remembered per space.
+- The shipped tab bar plus Files / Git panel buttons: clicking one switches the right panel stack, clicking the shown one hides it; Git is always offered here, and the choice is remembered per space.
 
 ### How they work together
 
