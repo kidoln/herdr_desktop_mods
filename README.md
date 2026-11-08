@@ -104,7 +104,7 @@
 
 ```sh
 # 1) 克隆到任意位置
-git clone <this-repo> ~/herdr-git-workspace
+git clone https://github.com/kidoln/herdr_desktop_mods.git ~/herdr-git-workspace
 
 # 2) 复制进 Herdr 配置目录（默认 ~/.config/herdr-app）
 cp -R ~/herdr-git-workspace/mods/* ~/.config/herdr-app/mods/
@@ -121,7 +121,7 @@ herdr-app do layout.switch --name herdr-git
   ```sh
   cd ~/.config/herdr-app
   git init
-  git remote add origin <this-repo>
+  git remote add origin https://github.com/kidoln/herdr_desktop_mods.git
   git fetch origin
   git switch -C main origin/main
   ```
@@ -131,6 +131,10 @@ herdr-app do layout.switch --name herdr-git
 - 操作以鼠标为主，不额外占用快捷键（git 面板里 Cmd/Ctrl+Enter 提交）。
 - 这些 mod 是受信任代码：会调用 `git`、shell / PowerShell 执行操作，安装前请知悉。
 - 已知上限：提交历史窗口 120 条；diff 600 KB / 4000 行；文件树每目录 500 条、总计 5000 条、深度 40。
+
+### 许可
+
+以 [Apache License 2.0](LICENSE) 发布。`agents-left`、`files-menu`、`status-branch`、`tabs-git` 改编自 Herdr 自带 mod（同样为 Apache-2.0），来源与版权说明见 [NOTICE](NOTICE)。
 
 ---
 
@@ -230,7 +234,7 @@ Requirements: a recent Herdr (developed and tested on macOS against 0.1.13); git
 
 ```sh
 # 1) Clone anywhere
-git clone <this-repo> ~/herdr-git-workspace
+git clone https://github.com/kidoln/herdr_desktop_mods.git ~/herdr-git-workspace
 
 # 2) Copy into the Herdr config folder (default ~/.config/herdr-app)
 cp -R ~/herdr-git-workspace/mods/* ~/.config/herdr-app/mods/
@@ -247,7 +251,7 @@ herdr-app do layout.switch --name herdr-git
   ```sh
   cd ~/.config/herdr-app
   git init
-  git remote add origin <this-repo>
+  git remote add origin https://github.com/kidoln/herdr_desktop_mods.git
   git fetch origin
   git switch -C main origin/main
   ```
@@ -257,3 +261,7 @@ herdr-app do layout.switch --name herdr-git
 - Mouse-first: no keybindings are taken (except Cmd/Ctrl+Enter to commit in the git panel).
 - These mods are trusted code: they run `git` and shell / PowerShell commands.
 - Known bounds: the history window is 120 commits; diffs cap at 600 KB / 4000 lines; the file tree lists 500 entries per folder, 5,000 in total, 40 levels deep.
+
+### License
+
+Released under the [Apache License 2.0](LICENSE). `agents-left`, `files-menu`, `status-branch` and `tabs-git` are adapted from mods shipped with Herdr (also Apache-2.0); see [NOTICE](NOTICE) for attribution.

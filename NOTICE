@@ -1,0 +1,21 @@
+Herdr Git Workspace
+===================
+
+Copyright 2026 李楠 (kidoln)
+
+A set of mods for Herdr (https://herdr.dev), plus one window layout
+(layouts/herdr-git.json).
+
+Mods written for this project:
+
+    mods/git
+    mods/git-diff
+    mods/file-view
+
+Mods adapted from mods shipped with Herdr, licensed under the Apache
+License, Version 2.0:
+
+    mods/agents-left    - adapted from Herdr's "agents" mod
+    mods/files-menu     - adapted from Herdr's "files" mod
+    mods/status-branch  - adapted from Herdr's "workspace-status" mod
+    mods/tabs-git       - adapted from Herdr's "tabs" mod
