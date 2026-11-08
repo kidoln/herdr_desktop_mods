@@ -36,6 +36,7 @@ const PER_FOLDER = 500, TOTAL = 5000;
 const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const baseOf = (p) => (p.includes("/") ? p.slice(p.lastIndexOf("/") + 1) : p);
 const splitExt = (name) => { const dot = name.lastIndexOf("."); return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""]; };
+const items = (n) => `${n} item${n === 1 ? "" : "s"}`;
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -224,7 +225,7 @@ export default class Files extends View {
       const r = p.renameOp;
       this.text = r ? r.name : "";
       this.busy = false; this.error = null; this.inputFocused = true;
-      this.input = InputState.new({ placeholder: r ? "新名称" : p.newOp.kind === "folder" ? "文件夹名" : "文件名", value: this.text });
+      this.input = InputState.new({ placeholder: r ? "New name" : p.newOp.kind === "folder" ? "Folder name" : "File name", value: this.text });
       if (this.text) this.input.set_selected_range({ start: 0, end: this.text.length });
       this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = null; cx.notify(); });
       this.input.on("submit", (_e, cx) => this.submitForm(cx));
@@ -428,7 +429,7 @@ export default class Files extends View {
     const canPaste = clipped && (clip.on ?? null) === (m.on ?? null);
     const pasteDir = tgt ? (tgt.dir ? tgt.rel : dirOf(tgt.rel)) : "";
     const abs = (rel) => `${m.root}/${rel}`;
-    const detail = sel.length > 1 ? `${sel.length} 项` : null;
+    const detail = sel.length > 1 ? items(sel.length) : null;
 
     const item = (id, label, extra, fn, opts = {}) => {
       const live = Boolean(fn) && !opts.disabled;
@@ -441,49 +442,49 @@ export default class Files extends View {
     };
     const sep = () => div().mx(6).my(2).h(1).bg(t.border);
 
-    const openItem = () => item("files-menu-open", tgt.dir ? "在文件管理器中打开" : "用缺省应用打开", null, () => {
+    const openItem = () => item("files-menu-open", tgt.dir ? "Open in file manager" : "Open with default app", null, () => {
       close();
-      openDefault(abs(tgt.rel), m.on).catch(e => notify({ title: `无法打开 ${tgt.name}`, body: String(e), level: "error" }));
+      openDefault(abs(tgt.rel), m.on).catch(e => notify({ title: `Cannot open ${tgt.name}`, body: String(e), level: "error" }));
     });
-    const viewItem = () => item("files-menu-view", "在面板中打开", null, () => { close(); showInPane(m.root, m.on, tgt.rel); });
-    const renameItem = () => item("files-menu-rename", "重命名…", null, () => {
+    const viewItem = () => item("files-menu-view", "Open in pane", null, () => { close(); showInPane(m.root, m.on, tgt.rel); });
+    const renameItem = () => item("files-menu-rename", "Rename…", null, () => {
       close();
       openOverlay({ mod: "files-menu", kind: "dialog", width: 420, height: 190,
         props: { renameOp: { root: m.root, on: m.on, rel: tgt.rel, name: tgt.name } } });
     });
-    const newItem = (kind) => item(`files-menu-new-${kind}`, kind === "folder" ? "新建文件夹…" : "新建文件…", null, () => {
+    const newItem = (kind) => item(`files-menu-new-${kind}`, kind === "folder" ? "New folder…" : "New file…", null, () => {
       close();
       openOverlay({ mod: "files-menu", kind: "dialog", width: 420, height: 190,
         props: { newOp: { root: m.root, on: m.on, dir: pasteDir, kind } } });
     });
-    const copyItem = (cut) => item(cut ? "files-menu-cut" : "files-menu-copy", cut ? "剪切" : "复制", detail, () => {
+    const copyItem = (cut) => item(cut ? "files-menu-cut" : "files-menu-copy", cut ? "Cut" : "Copy", detail, () => {
       setShared("files.clipboard", { on: m.on, cut, root: m.root, entries: sel.map(e => ({ name: e.name, path: abs(e.rel) })) });
-      notify({ title: cut ? `已剪切 ${sel.length} 项` : `已复制 ${sel.length} 项`, timeout: 1400 });
+      notify({ title: cut ? `Cut ${items(sel.length)}` : `Copied ${items(sel.length)}`, timeout: 1400 });
       close();
     });
     // The paste keeps the menu up until it has run: closing it takes the copy
     // (and its task) away.
-    const pasteItem = () => item("files-menu-paste", "粘贴", canPaste ? `${clip.entries.length} 项` : clipped ? "其他机器" : null, canPaste ? (cx) => {
+    const pasteItem = () => item("files-menu-paste", "Paste", canPaste ? items(clip.entries.length) : clipped ? "Another machine" : null, canPaste ? (cx) => {
       const c = clip, dir = pasteDir;
       cx.spawn(async () => {
         try {
           const { names } = await pasteInto(c, dir ? `${m.root}/${dir}` : m.root, m.on);
           if (c.cut) setShared("files.clipboard", null);
           bumpRefresh();
-          notify(names.length ? { title: `已粘贴 ${names.length} 项`, timeout: 1800 } : { title: "没有可粘贴的内容", body: "项目已在目标文件夹中", timeout: 1800 });
+          notify(names.length ? { title: `Pasted ${items(names.length)}`, timeout: 1800 } : { title: "Nothing to paste", body: "The items are already in the target folder", timeout: 1800 });
         } catch (e) {
-          notify({ title: "粘贴失败", body: String(e), level: "error", timeout: 5000 });
+          notify({ title: "Paste failed", body: String(e), level: "error", timeout: 5000 });
         }
         close();
       });
     } : null, { disabled: !canPaste });
-    const pathItem = () => item("files-menu-path", "复制路径", detail, (cx) => cx.spawn(async () => {
+    const pathItem = () => item("files-menu-path", "Copy path", detail, (cx) => cx.spawn(async () => {
       const ok = await copyText(sel.map(e => abs(e.rel)).join("\n"));
-      notify(ok ? { title: "路径已复制", body: single?.name, timeout: 1600 }
-        : { title: "无法复制", body: "没有找到剪贴板工具 (pbcopy, wl-copy, xclip)", level: "warning", timeout: 2400 });
+      notify(ok ? { title: "Path copied", body: single?.name, timeout: 1600 }
+        : { title: "Cannot copy", body: "No clipboard tool found (pbcopy, wl-copy, xclip)", level: "warning", timeout: 2400 });
       close();
     }));
-    const deleteItem = () => item("files-menu-delete", "删除", detail, () => {
+    const deleteItem = () => item("files-menu-delete", "Delete", detail, () => {
       close();
       openOverlay({ mod: "files-menu", kind: "dialog", width: 420, height: 200 + Math.min(sel.length, 7) * 16,
         props: { confirmDelete: { root: m.root, on: m.on, entries: sel } } });
@@ -505,7 +506,7 @@ export default class Files extends View {
       .track_focus(this.menuHandle)
       .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); close(); } })
       .child(h_flex().h(21).px(7).items_center().child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim)
-        .child(sel.length > 1 ? `已选 ${sel.length} 项` : single?.name ?? baseOf(m.root) ?? "")))
+        .child(sel.length > 1 ? `${items(sel.length)} selected` : single?.name ?? baseOf(m.root) ?? "")))
       .children(rows);
   }
 
@@ -518,15 +519,15 @@ export default class Files extends View {
     return v_flex().id("files-form").size_full().track_focus(this.handle)
       .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); close(); } })
       .p(16).gap(10).bg(t.popover).text_size(13).text_color(t.foreground)
-      .child(div().font_semibold().child(rename ? "重命名" : f.kind === "folder" ? "新建文件夹" : "新建文件"))
+      .child(div().font_semibold().child(rename ? "Rename" : f.kind === "folder" ? "New folder" : "New file"))
       .when(rename, el => el.child(div().flex_none().truncate().text_size(11.5).text_color(t.dim).child(f.name)))
       .child(Input.new(this.input).h(32).px(10).rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
       .when(Boolean(this.error), el => el.child(div().flex_none().truncate().text_size(11.5).text_color(t.ansi1).child(this.error)))
       .child(div().flex_1())
       .child(h_flex().items_center().gap(8)
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.busy ? "处理中…" : "\u21b5 提交 \u00b7 Esc 取消"))
-        .child(this.textButton("files-form-cancel", "取消", t.background, t.foreground, () => close(), t))
-        .child(this.textButton("files-form-ok", rename ? "重命名" : "创建", ready ? t.solid : t.raised, ready ? t.solid_foreground : t.dim, (cx) => this.submitForm(cx), t)));
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.busy ? "Working…" : "\u21b5 Submit \u00b7 Esc Cancel"))
+        .child(this.textButton("files-form-cancel", "Cancel", t.background, t.foreground, () => close(), t))
+        .child(this.textButton("files-form-ok", rename ? "Rename" : "Create", ready ? t.solid : t.raised, ready ? t.solid_foreground : t.dim, (cx) => this.submitForm(cx), t)));
   }
 
   // Rename: one mv, with the name checked first. New: one mkdir / touch. A
@@ -535,24 +536,24 @@ export default class Files extends View {
     const p = props(), r = p.renameOp, n = p.newOp, overlay = p.overlay;
     if (this.busy) return;
     const name = this.text.trim();
-    if (!name) { this.error = "名称不能为空"; cx.notify(); return; }
-    if (/[\\/]/.test(name) || name === "." || name === "..") { this.error = "名称不能包含斜杠"; cx.notify(); return; }
+    if (!name) { this.error = "The name cannot be empty"; cx.notify(); return; }
+    if (/[\\/]/.test(name) || name === "." || name === "..") { this.error = "The name cannot contain a slash"; cx.notify(); return; }
     this.busy = true; this.error = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
         if (r) {
           if (name !== r.name) {
             const dir = dirOf(r.rel), from = `${r.root}/${r.rel}`, to = dir ? `${r.root}/${dir}/${name}` : `${r.root}/${name}`;
-            if (await exists(to, r.on)) throw new Error(`已存在「${name}」`);
+            if (await exists(to, r.on)) throw new Error(`"${name}" already exists`);
             await transfer(from, to, true, r.on);
             viewMoved(r.root, r.on, from, to);
-            notify({ title: "已重命名", body: name, timeout: 1600 });
+            notify({ title: "Renamed", body: name, timeout: 1600 });
           }
         } else {
           const to = n.dir ? `${n.root}/${n.dir}/${name}` : `${n.root}/${name}`;
-          if (await exists(to, n.on)) throw new Error(`已存在「${name}」`);
+          if (await exists(to, n.on)) throw new Error(`"${name}" already exists`);
           if (n.kind === "folder") await makeFolder(to, n.on); else await makeFile(to, n.on);
-          notify({ title: n.kind === "folder" ? "已新建文件夹" : "已新建文件", body: name, timeout: 1600 });
+          notify({ title: n.kind === "folder" ? "Folder created" : "File created", body: name, timeout: 1600 });
         }
         bumpRefresh();
         closeOverlay(overlay);
@@ -575,15 +576,15 @@ export default class Files extends View {
         else if (e.key === "enter" && !this.busy) { cx.stop_propagation(); this.doDelete(cx); }
       })
       .p(16).gap(10).bg(t.popover).text_size(13).text_color(t.foreground)
-      .child(div().font_semibold().child(`删除 ${d.entries.length} 项？`))
+      .child(div().font_semibold().child(`Delete ${items(d.entries.length)}?`))
       .child(v_flex().gap(2).children(rows)
-        .when(d.entries.length > 7, el => el.child(div().h(18).text_size(11.5).text_color(t.dim).child(`…等共 ${d.entries.length} 项`))))
-      .child(div().text_size(11.5).text_color(t.ansi1).child("删除后无法恢复。"))
+        .when(d.entries.length > 7, el => el.child(div().h(18).text_size(11.5).text_color(t.dim).child(`…and ${d.entries.length - 7} more`))))
+      .child(div().text_size(11.5).text_color(t.ansi1).child("This cannot be undone."))
       .when(Boolean(this.error), el => el.child(div().flex_none().truncate().text_size(11.5).text_color(t.ansi1).child(this.error)))
       .child(div().flex_1())
       .child(h_flex().justify_end().items_center().gap(8)
-        .child(this.textButton("files-delete-cancel", "取消", t.background, t.foreground, () => close(), t))
-        .child(this.textButton("files-delete-yes", this.busy ? "正在删除…" : "删除", this.busy ? t.raised : t.ansi1, this.busy ? t.dim : t.background, (cx) => this.doDelete(cx), t)));
+        .child(this.textButton("files-delete-cancel", "Cancel", t.background, t.foreground, () => close(), t))
+        .child(this.textButton("files-delete-yes", this.busy ? "Deleting…" : "Delete", this.busy ? t.raised : t.ansi1, this.busy ? t.dim : t.background, (cx) => this.doDelete(cx), t)));
   }
 
   // rm -rf on the machine holding the files; the dialog stays up while it runs.
@@ -597,7 +598,7 @@ export default class Files extends View {
         await deletePaths(abs, d.on);
         viewGone(d.root, d.on, abs);
         bumpRefresh();
-        notify({ title: `已删除 ${abs.length} 项`, timeout: 1600 });
+        notify({ title: `Deleted ${items(abs.length)}`, timeout: 1600 });
         closeOverlay(overlay);
       } catch (e) {
         this.error = String(e?.message ?? e); this.busy = false; cx.notify();
@@ -651,7 +652,7 @@ export default class Files extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim)
-          .child(this.selected.size ? `${this.selected.size} 项已选` : this.root?.split(/[\\/]/).pop() ?? "")))
+          .child(this.selected.size ? `${items(this.selected.size)} selected` : this.root?.split(/[\\/]/).pop() ?? "")))
       .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.menu(null, null); })
         .on_click((_e, cx) => { if (this.selected.size) { this.selected = new Set(); this.anchor = null; cx.notify(); } })
