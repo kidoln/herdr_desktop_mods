@@ -82,15 +82,27 @@ export default class Tabs extends View {
     const held = new Set((body?.children ?? []).map(c => c.id));
     const enabled = [...new Set([...(shared("workspace.panels") ?? ["files"]), "git"])].filter(id => held.has(id));
     this.syncPanel(space, panel, body, enabled);
-    const panelButton = (id, label, icon) => {
+    // The Git panel publishes the files waiting there (shared "git.counts"); the
+    // button carries them as a corner badge on its right-bottom corner, so
+    // uncommitted work shows from the tab bar whether or not the panel is open.
+    // Each file counts once.
+    const counts = shared("git.counts");
+    const tip = counts?.total > 0 ? [counts.staged > 0 ? `${counts.staged} staged` : null, counts.changes > 0 ? `${counts.changes} changes` : null].filter(Boolean).join(" · ") : "";
+    const gitBadge = counts?.total > 0 ? div()
+      .absolute().right(-4).bottom(-4).h(13).min_w(13).pl(3.6).pr(2.4).rounded_full()
+      .bg(t.accent).text_color(t.accent_foreground)
+      .text_size(9.5).font_semibold().flex().items_center().justify_center()
+      .tooltip(tip)
+      .child(counts.total > 99 ? "99+" : String(counts.total)) : null;
+    const panelButton = (id, label, icon, badge) => {
       const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      return h_flex().id(`panel-${id}`).relative().h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click(() => {
           if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(svg(icon).size(14)).child(label);
+        }).child(svg(icon).size(14)).child(label).when(Boolean(badge), el => el.child(badge));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -98,7 +110,7 @@ export default class Tabs extends View {
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
-      .when(enabled.includes("git"), el => el.child(panelButton("git", "Git", "mods/git/git.svg")))
+      .when(enabled.includes("git"), el => el.child(panelButton("git", "Git", "mods/git/git.svg", gitBadge)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-git/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-git/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-git/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

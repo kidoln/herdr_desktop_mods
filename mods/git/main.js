@@ -25,6 +25,10 @@
 // a button that runs `git init` there and reads it again; nothing else in the panel
 // draws while there is no repository to draw from.
 //
+// The panel also publishes how many files are waiting here (both lists, each file
+// once) as shared "git.counts", so the tab bar's Git button can carry a badge; with
+// no repository read, the count is zero and the badge goes.
+//
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
 // the comparison to the `git-diff` pane in the main area — side by side, or a single
 // green (new file) / red (deleted file) column when there is no other side to pair.
@@ -309,6 +313,22 @@ export default class Git extends View {
     this.commitView = null; this.branchPick = false; this.picked = new Set();
     this.resize = null; this.confirm = null; this.confirmAll = false; this.hovered = null;
     this.error = null; this.notRepo = false; this.note = null; this.limited = false;
+    // A copy without one live space is a `herdr-app check` harness, not the
+    // panel on screen: it must not clear what the panel published.
+    if (spaces().length) this.publishCounts();
+  }
+
+  // What the tab bar's Git badge shows: the files waiting in the panel, each
+  // once (untracked and conflicted included). Unchanged counts write nothing --
+  // every setShared redraws every mod, and this refresh runs every ten seconds.
+  // The shared value is read back, not kept on this copy, so a stale write from
+  // anywhere heals on the next refresh.
+  publishCounts() {
+    const counts = { staged: this.staged.length, changes: this.unstaged.length, total: this.files.length, limited: this.limited };
+    const last = shared("git.counts");
+    if (last && last.staged === counts.staged && last.changes === counts.changes
+      && last.total === counts.total && last.limited === counts.limited) return;
+    setShared("git.counts", counts);
   }
 
   refresh(cx) {
@@ -468,6 +488,7 @@ export default class Git extends View {
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
         this.unstaged = parsed.filter((f) => f.unstaged).map((f) => ({ ...f, ...(workStats[f.path] ?? {}) }));
+        this.publishCounts();
         this.error = null; this.notRepo = false; this.watch(root, cx);
         // A commit's file list never changes, so it is read once when opened. A
         // background refresh only retries it if that first read has not succeeded yet.
