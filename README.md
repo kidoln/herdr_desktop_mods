@@ -21,6 +21,8 @@
 
 仓库结构与 Herdr 的配置目录（默认 `~/.config/herdr-app/`）一一对应，可以按需复制进去使用。仓库只跟踪我们自己的文件；Herdr 自带的 mod、布局、窗口状态都不在其中（见 `.gitignore`）。Herdr 自带的功能（spaces、changes、pane、win98 等）不属于本项目。
 
+对自带 mod 的改动都以**克隆**形式存在：Agents 列表的改版是 `agents-left`，Files 面板的改版是 `files-menu`（另有 `tabs-git`、`status-branch`）——仓库跟踪与维护的正是这些克隆；Herdr 每次启动会重写或还原的原版副本（`mods/agents`、`mods/files` 等）不纳入版本管理。
+
 装上这个布局后，窗口是这样的：
 
 | 区域 | 内容 |
@@ -144,6 +146,8 @@ A personal extension pack for Herdr, in two parts:
 - `layouts/herdr-git.json`: a window layout that assembles them into a full workspace (a clone of the shipped `main` layout).
 
 The repository mirrors the Herdr config folder (default `~/.config/herdr-app/`), so its files can be copied straight into place. Only this project's files are tracked; Herdr's own mods, layouts and window state stay out (see `.gitignore`). Herdr's built-in pieces (spaces, changes, pane, win98, …) are not part of this project.
+
+Changes to built-in mods live as **clones**: the modified agents list is `agents-left`, the reworked Files panel is `files-menu` (plus `tabs-git` and `status-branch`). Those clones are what this repository tracks and maintains; the pristine copies Herdr rewrites or restores on every start (`mods/agents`, `mods/files`, …) are not versioned.
 
 The window looks like this:
 
