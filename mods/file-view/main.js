@@ -146,24 +146,24 @@ export default class FileView extends View {
     if (seq === this.seq) return;
     this.seq = seq;
     this.target = target?.path && target.root ? target : null;
+    // sync runs at the top of render (a shared-state change is what redraws this
+    // pane), so the mutations here are already in this pass's tree; cx.notify()
+    // is not allowed during render.
     if (!this.target) {
       if (!this.dirty) { this.leave(); this.loading = false; }
-      cx.notify();
       return;
     }
     // The pane already holds this file: nothing to load, and any read still in
     // flight for another file is stale now.
     if (this.editFile && this.sameFile(this.target, this.editFile)) {
       this.loadToken += 1; this.loading = false;
-      cx.notify();
       return;
     }
     if (this.image && this.sameFile(this.target, this.shownImage)) {
       this.loadToken += 1; this.loading = false;
-      cx.notify();
       return;
     }
-    if (this.dirty) { cx.notify(); return; }   // wait: the edits stay until saved
+    if (this.dirty) return;   // wait: the edits stay until saved
     this.load(this.target, cx);
   }
 
