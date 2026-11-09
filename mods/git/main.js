@@ -37,10 +37,11 @@
 // so a refusal no longer waits for a change of folder to clear.
 //
 // Clicking a file (or a file inside a commit) does not draw its diff here: it hands
-// the comparison to the `git-diff` pane in the main area — side by side, or a single
+// the comparison to the `git-diff` tab in the main area — side by side, or a single
 // green (new file) / red (deleted file) column when there is no other side to pair.
-// Clicking the file that pane is already showing closes the pane again, so the same
-// click toggles the comparison off.
+// One diff tab serves the space: another click updates it in place and shows it
+// again. Clicking the file that tab is already showing closes the tab again, so the
+// same click toggles the comparison off.
 // Clicking a commit does not push a detail panel under the list either: its message
 // and changed-file list open as an anchored surface right under that row, floating
 // over the commits below it. The same click toggles it off; so do Escape and a press
@@ -57,17 +58,30 @@ import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popup, HoverCard } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
+// The last folder a terminal named, so the git-diff tab (a mod tab with no
+// terminal of its own) keeps the panel on the repository it was following.
+let lastTerm = null; // { cwd, on, space }
+
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  // A mod pane (the git panel itself, or the git-diff pane) has no folder of its
+  // A mod pane (the git panel itself, or the git-diff tab) has no folder of its
   // own: keep following the tab's terminal, so showing a diff never changes repo.
   if (pane && !pane.terminal) {
     const term = panes().find((p) => p.tab === pane.tab && p.terminal);
-    if (term?.cwd) return { cwd: term.cwd, on };
+    if (term?.cwd) { lastTerm = { cwd: term.cwd, on, space: space?.id }; return { cwd: term.cwd, on }; }
+    // A mod tab holding no terminal (the git-diff or file-view tab this layout
+    // opens): the comparison, else the viewed file, names its repository;
+    // failing that, keep the last one a terminal named in this space.
+    const t = pane.mod === "git-diff" ? shared("git.diff")
+      : pane.mod === "file-view" ? shared("files.view") : null;
+    if (t?.root) return { cwd: t.root, on: t.on ?? on };
+    if (lastTerm && lastTerm.space === space?.id) return { cwd: lastTerm.cwd, on };
   }
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  const loc = { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  if (pane?.cwd) lastTerm = { cwd: pane.cwd, on, space: space?.id };
+  return loc;
 }
 const ctxKey = () => JSON.stringify(location());
 
@@ -510,29 +524,30 @@ export default class Git extends View {
     });
   }
 
-  // ---- the side-by-side pane ----
+  // ---- the git-diff tab ----
 
-  diffPane(tab) {
-    return panes().find((p) => p.mod === "git-diff" && p.tab === tab) ?? null;
+  // The git-diff pane of this space, if one is up: the panel keeps a single diff
+  // tab, updated in place, rather than one per click.
+  diffPane() {
+    const space = spaces().find((s) => s.active);
+    if (!space) return null;
+    const tabs = new Set(space.tabs.map((t) => t.id));
+    return panes().find((p) => p.mod === "git-diff" && tabs.has(p.tab)) ?? null;
   }
 
-  // The comparison the git-diff pane is showing, but only while its pane is up in
-  // the current tab — a closed pane clears the row highlight.
+  // The comparison the git-diff tab is showing, but only while its pane is up — a
+  // closed tab clears the row highlight.
   shownTarget() {
     const target = shared("git.diff");
     if (!target?.path) return null;
-    return this.diffPane(focused()?.tab) ? target : null;
+    return this.diffPane() ? target : null;
   }
 
-  // Hand the comparison to the git-diff pane: publish it, and open the pane in the
-  // focused tab if it is not there yet. A later click updates the same pane. The
-  // pane splits off the focused terminal, or the tab's first one when a mod pane
-  // (this panel) holds the keyboard.
+  // Hand the comparison to the git-diff tab: publish it, open the tab when none
+  // is up yet, and update (and show) the one that is. A later click updates the
+  // same tab; the tab takes the file's name, so it reads as what it compares.
   openDiff(target, cx) {
-    const f = focused(), tab = f?.tab ?? null;
-    const anchor = (f?.pane && panes().find((p) => p.pane === f.pane && p.terminal)) ? f.pane
-      : panes().find((p) => p.tab === tab && p.terminal)?.pane ?? null;
-    const existing = this.diffPane(tab);
+    const existing = this.diffPane();
     this.seq += 1;
     setShared("git.diff", {
       seq: this.seq,
@@ -545,20 +560,26 @@ export default class Git extends View {
       commit: target.commit ?? null,
       commitShort: target.commitShort ?? null,
     });
-    if (!existing && anchor) run("pane.split", { direction: "right", pane: anchor, mod: "git-diff" });
+    const name = target.path.slice(target.path.lastIndexOf("/") + 1);
+    if (existing) {
+      run("tab.rename", { id: existing.tab, name });
+      run("tab.select", { id: existing.tab });
+    } else {
+      run("tab.new", { mod: "git-diff", name });
+    }
     cx.notify();
   }
 
-  // Clicking the file the pane is already showing takes the comparison down again:
-  // the lit row reads as "on", so the same click toggles it off by closing the pane.
+  // Clicking the file the tab is already showing takes the comparison down again:
+  // the lit row reads as "on", so the same click toggles it off by closing the tab.
   // Every other file opens or updates it as before.
   toggleDiff(target, cx) {
     const shown = this.shownTarget();
     const same = Boolean(shown) && shown.mode === target.mode && shown.path === target.path
       && (target.mode !== "commit" || shown.commit === target.commit);
     if (!same) return false;
-    const pane = this.diffPane(focused()?.tab);
-    if (pane) run("pane.close", { pane: pane.pane });
+    const pane = this.diffPane();
+    if (pane) run("tab.close", { id: pane.tab });
     cx.notify();
     return true;
   }
@@ -1321,8 +1342,8 @@ export default class Git extends View {
   }
 
   // The surface a picked commit opens under its row: its message and the names
-  // of the files it changed. Choosing a file hands its diff to the git-diff pane
-  // in the main area; choosing the file that pane already shows closes it again.
+  // of the files it changed. Choosing a file hands its diff to the git-diff tab
+  // in the main area; choosing the file that tab already shows closes it again.
   commitPopup(t) {
     const c = this.commitView;
     const files = c.files.slice(0, 800);

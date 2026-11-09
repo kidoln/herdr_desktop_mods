@@ -1,11 +1,12 @@
 // A lazy file browser for the focused pane's folder. Clicking a file hands it to
-// the file-view pane in the main area (shared("files.view")), like the git panel
-// hands a diff to git-diff -- it opens there as an editor; the same click on the
-// shown file closes the pane again, and a click on a folder opens or closes it.
+// the file-view tab in the main area (shared("files.view")), like the git panel
+// hands a diff to git-diff -- it opens there as an editor; one view tab serves the
+// space (another click updates it in place), the same click on the shown file
+// closes the tab again, and a click on a folder opens or closes it.
 // Rows are selectable: Cmd/Ctrl+click toggles one, Shift+click takes the range
 // from the last click, and the right-click menu acts on the whole selection.
 // The file's menu opens it (the system's default application, or the file-view
-// pane), renames it, copies/cuts it, pastes into the clicked folder, copies its
+// tab), renames it, copies/cuts it, pastes into the clicked folder, copies its
 // path, and deletes it; a folder's menu also makes files and folders, and the
 // tree's empty space has the whole-folder versions (new, paste).
 // Copy and cut leave their entries in shared("files.clipboard"); paste copies --
@@ -19,18 +20,31 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, window, props, openOverlay, closeOverlay, notify, run, shared, setShared } from "herdr";
 
+// The last folder a terminal named, so the file-view tab (a mod tab with no
+// terminal of its own) keeps the panel on the folder it was browsing.
+let lastTerm = null; // { cwd, on, space }
+
 function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  // A mod pane (this panel itself, or the file-view pane it opens) has no folder
-  // of its own: keep following the tab's terminal, so opening a file never
-  // changes the folder being browsed.
+  // A mod pane (this panel itself, or the file-view tab) has no folder of its
+  // own: keep following the tab's terminal, so opening a file never changes the
+  // folder being browsed.
   if (pane && !pane.terminal) {
     const term = panes().find(p => p.tab === pane.tab && p.terminal);
-    if (term?.cwd) return { cwd: term.cwd, on, space: space?.id };
+    if (term?.cwd) { lastTerm = { cwd: term.cwd, on, space: space?.id }; return { cwd: term.cwd, on, space: space?.id }; }
+    // A mod tab holding no terminal (the file-view or git-diff tab this layout
+    // opens): the viewed file, else the compared diff, names its folder;
+    // failing that, keep the last one a terminal named in this space.
+    const v = pane.mod === "file-view" ? shared("files.view")
+      : pane.mod === "git-diff" ? shared("git.diff") : null;
+    if (v?.root) return { cwd: v.root, on: v.on ?? on, space: space?.id };
+    if (lastTerm && lastTerm.space === space?.id) return { cwd: lastTerm.cwd, on, space: space?.id };
   }
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  const loc = { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  if (pane?.cwd) lastTerm = loc;
+  return loc;
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
@@ -241,19 +255,32 @@ async function copyText(text) {
   return false;
 }
 
-// Hands a file to the file-view pane in the focused tab, opening the pane when
-// it is not there yet. The panel's click and the menu's "open in pane" share it.
-// The sequence keeps growing so the pane reloads only when the target changes.
-function showInPane(root, on, rel) {
-  const f = focused(), tab = f?.tab ?? null;
-  const anchor = (f?.pane && panes().find((p) => p.pane === f.pane && p.terminal)) ? f.pane
-    : panes().find((p) => p.tab === tab && p.terminal)?.pane ?? null;
-  const up = panes().some((p) => p.mod === "file-view" && p.tab === tab);
-  setShared("files.view", { seq: (Number(shared("files.view")?.seq) || 0) + 1, root, on, path: rel });
-  if (!up && anchor) run("pane.split", { direction: "right", pane: anchor, mod: "file-view" });
+// The file-view tab of this space, if one is up: the panel keeps a single view
+// tab, updated in place, rather than one per click.
+function viewTab() {
+  const space = spaces().find(s => s.active);
+  if (!space) return null;
+  const tabs = new Set(space.tabs.map(t => t.id));
+  return panes().find(p => p.mod === "file-view" && tabs.has(p.tab))?.tab ?? null;
 }
 
-// The file-view pane follows its file: a rename/move repoints the published
+// Hands a file to the file-view tab, opening the tab when none is up yet and
+// updating (and showing) the one that is. The panel's click and the menu's
+// "Open in tab" share it. The sequence keeps growing so the tab reloads only
+// when the target changes; the tab takes the file's name.
+function showInPane(root, on, rel) {
+  const up = viewTab();
+  setShared("files.view", { seq: (Number(shared("files.view")?.seq) || 0) + 1, root, on, path: rel });
+  const name = baseOf(rel);
+  if (up) {
+    run("tab.rename", { id: up, name });
+    run("tab.select", { id: up });
+  } else {
+    run("tab.new", { mod: "file-view", name });
+  }
+}
+
+// The file-view tab follows its file: a rename/move repoints the published
 // target, a delete takes it away (file-view keeps unsaved edits either way).
 function viewMoved(root, on, from, to) {
   const shown = shared("files.view");
@@ -422,7 +449,7 @@ export default class Files extends View {
 
   // A row's click: modifiers select, a plain click selects that one and keeps
   // the old click behavior -- a folder opens or closes, a file opens in (or
-  // closes from) the file-view pane. The second press of a double-click is the
+  // closes from) the file-view tab. The second press of a double-click is the
   // first one again, so only the first acts.
   clickRow(rel, entry, e, cx) {
     if (e.modifiers.platform || e.modifiers.control) { this.toggleSelect(rel); cx.notify(); return; }
@@ -451,28 +478,23 @@ export default class Files extends View {
       props: { fileMenu: { root: this.root, on: this.on, target: entry ? { rel, name: entry.name, dir: entry.dir } : null, selection } } });
   }
 
-  // ---- the file-view pane in the main area ----
+  // ---- the file-view tab in the main area ----
 
-  // The pane, if it is up in this tab.
-  viewPane(tab) {
-    return panes().find(p => p.mod === "file-view" && p.tab === tab) ?? null;
-  }
-
-  // The file the pane is showing, but only while its pane is up in the current
-  // tab — a closed pane clears the row highlight.
+  // The file the file-view tab is showing, but only while that tab is up — a
+  // closed tab clears the row highlight.
   shownTarget() {
     const target = shared("files.view");
     if (!target?.path) return null;
-    return this.viewPane(focused()?.tab) ? target : null;
+    return viewTab() ? target : null;
   }
 
-  // Clicking the file the pane is already showing takes the view down again: the
-  // lit row reads as "on", so the same click toggles it off by closing the pane.
+  // Clicking the file the tab is already showing takes the view down again: the
+  // lit row reads as "on", so the same click toggles it off by closing the tab.
   pick(path, cx) {
     const shown = this.shownTarget();
     if (shown && shown.path === path && shown.root === this.root) {
-      const pane = this.viewPane(focused()?.tab);
-      if (pane) run("pane.close", { pane: pane.pane });
+      const tab = viewTab();
+      if (tab) run("tab.close", { id: tab });
       cx.notify();
       return;
     }
@@ -507,7 +529,7 @@ export default class Files extends View {
       close();
       openDefault(abs(tgt.rel), m.on).catch(e => notify({ title: `Cannot open ${tgt.name}`, body: String(e), level: "error" }));
     });
-    const viewItem = () => item("files-menu-view", "Open in pane", null, () => { close(); showInPane(m.root, m.on, tgt.rel); });
+    const viewItem = () => item("files-menu-view", "Open in tab", null, () => { close(); showInPane(m.root, m.on, tgt.rel); });
     const renameItem = () => item("files-menu-rename", "Rename…", null, () => {
       close();
       openOverlay({ mod: "files-menu", kind: "dialog", width: 420, height: 190,

@@ -14,8 +14,8 @@
 // copy plus its pixel size are kept. A picture bigger than the pane shows
 // scaled down; clicking it (or the header's 1:1 / Fit chip) shows it at its own
 // size, scrolling whatever does not fit.
-// Clicking the file the pane already shows closes it again (the panel's own
-// click toggles), and another file opens in the same pane. A picked file never
+// Clicking the file the tab already shows closes it again (the panel's own
+// click toggles), and another file opens in the same tab. A picked file never
 // throws away unsaved edits: while the editor is modified it waits, and the
 // save releases it.
 

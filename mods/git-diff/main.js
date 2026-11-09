@@ -16,7 +16,7 @@
 // unsaved changes asks once.
 //
 // It never writes to the repository, follows the panel (another click updates the
-// same pane), and follows the panel's machine for a remote space.
+// same tab), and follows the panel's machine for a remote space.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, Editor, EditorState } from "gpui-base";
