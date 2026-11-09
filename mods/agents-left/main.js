@@ -26,7 +26,8 @@ function toggleSidebar() {
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
 
-const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+// "OC | fix login" reads "fix login": the command half says nothing the icon doesn't.
+const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").replace(/^[\w.-]{1,16}\s*\|\s*/u, "").trim();
 
 function leadPanes(all) {
   const leads = new Map();
@@ -307,7 +308,7 @@ export default class Agents extends View {
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(panes());
     const tabLabels = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, title(tab, leads.get(tab.id))]));
-    const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (a.title || a.program?.name || "")]));
+    const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (clean(a.title) || a.program?.name || "")]));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};
