@@ -41,5 +41,7 @@ node_modules/
 !/mods/files-menu/
 !/mods/git/
 !/mods/git-diff/
+!/mods/spaces-rail/
 !/mods/status-branch/
 !/mods/tabs-git/
+!/mods/workspace-chrome-rail/
