@@ -3,9 +3,9 @@
 // one checks it out. The Git panel's branch row follows on its own folder watch.
 // It also shows the focused terminal's live folder (the space's, when the
 // focused pane is a mod), with the home folder shortened to "~", and the last
-// message sent to the main pane's opencode agent, read from opencode's own
-// SQLite state. Hovering that message crawls it right to left when it does not
-// fit.
+// message sent to the shown tab's opencode agent (or the focused terminal's,
+// when that is one; never another tab's), read from opencode's own SQLite
+// state. Hovering that message crawls it right to left when it does not fit.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
 import { spaces, agents, panes, terminals, exec, focused, home, notify, theme, run, window, keys } from "herdr";
@@ -41,12 +41,17 @@ function isOpencode(a) {
   return a?.app === OPENCODE || a?.program?.key === OPENCODE;
 }
 
-// The agent the main pane is about: the focused one, else the active tab's
-// opencode agent, else the space's most recently changed one.
+// The agent the bar is about: the focused one, else the active tab's
+// opencode agent. Never another tab's: a new tab with a plain shell, or a
+// terminal where opencode has exited, shows nothing — another window's
+// prompt is not this bar's business.
 function currentOpencodeAgent() {
   const f = focused();
-  const addr = f?.agent ?? f?.terminal;
   const list = agents();
+  // focused().agent is the agent an agent block shows — the first agent when
+  // no agent block exists — not the focused terminal. Following it would keep
+  // the old tab's prompt on every new tab. Only the focused terminal counts.
+  const addr = f?.terminal ?? null;
   if (addr) {
     const a = list.find((x) => x.address === addr);
     if (a) return isOpencode(a) ? a : null;
@@ -54,9 +59,8 @@ function currentOpencodeAgent() {
   const space = spaces().find((s) => s.active);
   if (!space) return null;
   const tab = f?.tab ?? space.tabs.find((t) => t.active)?.id;
-  const inTab = list.filter((a) => isOpencode(a) && a.space === space.id && a.tab === tab);
-  const pool = inTab.length ? inTab : list.filter((a) => isOpencode(a) && a.space === space.id);
-  return pool.sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))[0] ?? null;
+  return list.filter((a) => isOpencode(a) && a.space === space.id && a.tab === tab)
+    .sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))[0] ?? null;
 }
 
 // One line for the bar: the terminal width is a single row, so newlines and
@@ -93,6 +97,8 @@ export default class StatusBranch extends View {
     this.prompt = "";      // the one-line text shown (and scrolled on hover)
     this.promptFull = "";  // the raw text, for comparing refreshes
     this.promptAgent = null;
+    this.promptTerm = null;   // the focused terminal the line belongs to
+    this.promptClear = null;  // pending delayed clear after its agent goes
     this.promptBusy = false;
     this.promptGen = 0;
     this.dataHomes = new Map();
@@ -199,21 +205,56 @@ export default class StatusBranch extends View {
     return { ok: true, text: "" };
   }
 
+  cancelPromptClear() {
+    try { this.promptClear?.cancel(); } catch {}
+    this.promptClear = null;
+  }
+
+  clearPrompt(cx) {
+    this.cancelPromptClear();
+    if (!this.prompt && !this.promptFull) return;
+    // What is shown belongs to an agent or tab that no longer owns the bar.
+    this.prompt = "";
+    this.promptFull = "";
+    this.promptUnit = 0;
+    this.clearMarquee();
+    cx.notify();
+  }
+
+  // opencode quitting clears the agent a moment before the terminal settles:
+  // keep the last line for a beat so a status flap cannot blank it and redraw
+  // it. A returning agent cancels this from refreshPrompt.
+  schedulePromptClear(cx) {
+    if (this.promptClear) return;
+    this.promptClear = cx.timer.after(450, (cx) => {
+      this.promptClear = null;
+      if (currentOpencodeAgent()) return;
+      this.clearPrompt(cx);
+    });
+  }
+
   refreshPrompt(cx) {
+    const f = focused();
+    const term = f?.terminal ?? null;
     const a = currentOpencodeAgent();
     const addr = a?.address ?? null;
-    if (addr !== this.promptAgent) {
-      // Another agent (or none) owns the bar now: what is shown belongs to
-      // the old one, and a read already in flight is about to be stale.
+    const termChanged = term !== this.promptTerm;
+    const agentChanged = addr !== this.promptAgent;
+
+    if (termChanged || agentChanged) {
+      // The context moved, or its agent came and went; a read in flight is
+      // about to be stale.
+      this.promptTerm = term;
       this.promptAgent = addr;
       this.promptGen++;
       this.promptBusy = false;
-      if (this.prompt || this.promptFull) {
-        this.prompt = "";
-        this.promptFull = "";
-        this.promptUnit = 0;
-        this.clearMarquee();
-        cx.notify();
+      if (!termChanged && term && this.prompt && (!addr || this.promptClear)) {
+        // Same terminal, the agent flickered: hold the line through the gap.
+        this.cancelPromptClear();
+        if (!addr) this.schedulePromptClear(cx);
+      } else {
+        // Another tab or terminal: what is shown belongs to the old context.
+        this.clearPrompt(cx);
       }
     }
     if (!a) return;
@@ -229,9 +270,11 @@ export default class StatusBranch extends View {
       try { res = await this.readOpencodePrompt({ cwd, title, machine }); } catch {}
       this.promptBusy = false;
       if (gen !== this.promptGen) return;
-      // A successful read with no message (a fresh session) shows nothing;
-      // only an unreadable database falls back to the session topic.
-      const text = res.ok ? res.text : title;
+      // opencode writes its database while quitting, so a read can be locked
+      // for a moment: keep the line as it is instead of flashing the session
+      // title. A successful read with no message (a fresh session) clears it.
+      if (!res.ok) return;
+      const text = res.text;
       const one = oneLine(text);
       if (one === this.prompt && text === this.promptFull) return;
       this.promptFull = text;
@@ -355,7 +398,12 @@ export default class StatusBranch extends View {
           .when(name === current, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(12).flex_none().text_color(t.accent)))));
   }
 
-  render() {
+  render(cx) {
+    // Focus changes redraw at once; the prompt timer runs every 1.5 s. Catch
+    // the change here so the old tab's prompt never lingers on screen.
+    const f = focused();
+    if ((f?.terminal ?? null) !== this.promptTerm ||
+        (currentOpencodeAgent()?.address ?? null) !== this.promptAgent) this.refreshPrompt(cx);
     const t = theme();
     const space = spaces().find(s => s.active);
     const hint = this.hint();
