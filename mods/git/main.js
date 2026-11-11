@@ -19,7 +19,10 @@
 // so a long tag name can never squeeze the message out. Resting the pointer on
 // a commit opens the whole row above it -- the subject on the first line with
 // the date, every tag and branch under that, nothing shortened. The Commits
-// pane's top edge drags to size it, and the size is remembered.
+// pane's top edge drags to size it, and the size is remembered. Its chevron has
+// three states: full, folded to the three newest commits, and closed (header
+// only) -- each click goes to the next, and dragging the folded pane's top edge
+// unfolds it.
 //
 // A folder that is not a repository yet reads so in the middle of the panel, with
 // a button that runs `git init` there and reads it again; nothing else in the panel
@@ -55,7 +58,7 @@
 // stays quiet.
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Popup, HoverCard } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Popup, HoverCard, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, shared, setShared, run, props, openOverlay, closeOverlay, notify } from "herdr";
 
 // The last folder a terminal named, so the git-diff tab (a mod tab with no
@@ -147,6 +150,13 @@ function numstat(out) {
 // are 14 apart, and the curves have radius 7.
 const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 1.25 };
 const KAPPA = 0.5523;
+
+// The Commits list's proportions, in design pixels: one commit row, the list's
+// own vertical padding, and the folded height that shows exactly the three
+// newest commits (no partial row at the edge).
+const COMMIT_ROW_H = 24;
+const LOG_PAD_Y = 4;
+const COMPACT_LOG_H = 3 * COMMIT_ROW_H + 2 * LOG_PAD_Y;
 
 // `tipName(c)` names the branch tip on a commit (the branch that colors it),
 // `lampOf(name)` its lamp.
@@ -293,7 +303,9 @@ export default class Git extends View {
     this.files = []; this.staged = []; this.unstaged = []; this.commits = [];
     this.seq = 0;
     this.collapsed = { staged: false, changes: false };
-    this.historyCollapsed = false;
+    // The Commits pane's three states: "expanded" (its remembered height),
+    // "compact" (the three newest commits), "collapsed" (header only).
+    this.historyMode = "expanded";
     // The branch list dropped from the branch row, and the refs picked in it
     // (nothing picked: every branch). The Commits pane's height drags on its
     // top edge and is remembered; `unit` is window units per design pixel,
@@ -305,6 +317,9 @@ export default class Git extends View {
     this._graph = null;
     const saved = Number(localStorage.getItem("logHeight"));
     this.logHeight = Number.isFinite(saved) && saved >= 72 ? Math.min(saved, 900) : 190;
+    // The position of the commit list, so folding it can bring the newest
+    // commit back to the top even after the list was scrolled far down.
+    this.logScroll = ScrollHandle.new();
     this.resize = null; this.size = null; this.unit = 1;
     this.message = ""; this.note = null; this.error = null; this.task = null;
     this.handle = cx.focus_handle();
@@ -1201,7 +1216,7 @@ export default class Git extends View {
   commitRow(t, c, g) {
     const open = this.commitView?.hash === c.hash;
     const isHead = c.hash === this.headSha;
-    const row = h_flex().id(`git-c-${c.hash}`).h(24).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
+    const row = h_flex().id(`git-c-${c.hash}`).h(COMMIT_ROW_H).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
       .when(open, (e) => e.bg(t.selected))
       .when(!open, (e) => e.hover((s) => s.bg(t.hover)))
       // The press belongs to the row: a press anywhere else in the panel takes the
@@ -1301,13 +1316,18 @@ export default class Git extends View {
 
   // The Commits pane. Its top edge is the drag strip: pull it up or down to size
   // the log (remembered; the strip also measures the window's pixel unit while
-  // it lays out). The count reads "<shown>/<all>" while a branch filter is on.
+  // it lays out). The chevron cycles the three states -- full, folded to the
+  // three newest commits, closed -- and dragging the strip while folded opens
+  // the pane and sizes it from the folded height. The count reads
+  // "<shown>/<all>" while a branch filter is on.
   historySection(t) {
     const commits = this.shownCommits();
     const graph = this.graph(commits);
     const filtered = this.picked.size > 0;
+    const compact = this.historyMode === "compact";
+    const closed = this.historyMode === "collapsed";
     return v_flex().flex_none().border_t(1).border_color(t.border)
-      .when(!this.historyCollapsed, (e) => e.child(
+      .when(!closed, (e) => e.child(
         div().id("git-log-resize").h(6).flex_none().w_full().cursor_row_resize()
           .when(this.resize, (s) => s.bg(t.accent))
           .when(!this.resize, (s) => s.hover((c) => c.bg(t.hover)))
@@ -1318,15 +1338,19 @@ export default class Git extends View {
           })
           .on_mouse_down("left", (ev, cx) => {
             cx.stop_propagation();
-            this.resize = { startY: ev.position.y, h: this.logHeight };
+            this.resize = { startY: ev.position.y, h: compact ? COMPACT_LOG_H : this.logHeight };
+            // Dragging a folded pane's edge unfolds it, so the drag has room to
+            // read as growth rather than as a shrinking three-row window.
+            if (compact) this.historyMode = "expanded";
           })
           .on_mouse_move((ev, cx) => this.resizeMove(ev, cx))
           .on_mouse_up("left", (_ev, cx) => this.resizeEnd(cx))))
       .child(h_flex().h(30).flex_none().pl(8).pr(10).gap(5).items_center()
         .child(div().id("git-log-tog").w(18).h(18).flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.historyCollapsed = !this.historyCollapsed; cx.notify(); })
-          .child(icon(this.historyCollapsed ? "chevron-right" : "chevron-down").size(14).text_color(t.muted)))
+          .tooltip(closed ? "Expand commits" : compact ? "Collapse commits" : "Show 3 commits")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.toggleHistory(cx); })
+          .child(icon(closed ? "chevron-right" : "chevron-down").size(14).text_color(t.muted)))
         .child(div().flex_1().text_size(11.5).font_semibold().text_color(t.muted).child("Commits"))
         .child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim)
           .child(filtered ? `${commits.length}/${this.commits.length}` : String(commits.length)))
@@ -1334,11 +1358,23 @@ export default class Git extends View {
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.refresh(cx); })
           .child(icon("refresh").size(13).text_color(t.dim))))
-      .when(!this.historyCollapsed, (e) => e.child(
-        v_flex().id("git-log").h(this.logHeight).flex_none().py(4).overflow_y_scrollbar()
+      .when(!closed, (e) => e.child(
+        v_flex().id("git-log").h(compact ? COMPACT_LOG_H : this.logHeight).flex_none().py(LOG_PAD_Y)
+          .overflow_y_scrollbar().track_scroll(this.logScroll)
           .children(commits.map((c, i) => this.commitRow(t, c, graph.rows[i])))
           .when(!commits.length, (e) => e.child(div().p(10).text_size(12).text_color(t.dim)
             .child(filtered ? "No commits in the picked branches" : this.hasHead ? "No commits" : "No commits yet")))));
+  }
+
+  // The chevron's cycle: full folds to the three newest commits, the fold
+  // closes, and a closed pane opens all the way. Folding brings the newest
+  // commit back to the top: "recent" stays true even when the full list was
+  // left scrolled down.
+  toggleHistory(cx) {
+    this.historyMode = this.historyMode === "expanded" ? "compact"
+      : this.historyMode === "compact" ? "collapsed" : "expanded";
+    if (this.historyMode === "compact") this.logScroll.scroll_to_item(0);
+    cx.notify();
   }
 
   // The surface a picked commit opens under its row: its message and the names
