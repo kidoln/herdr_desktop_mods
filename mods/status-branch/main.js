@@ -119,6 +119,14 @@ export default class StatusBranch extends View {
     this.refreshPrompt(cx);
   }
 
+  // Repaint after a change. From an event handler or a task notify() works;
+  // from a layout/measurement callback (on_size_change) it is refused while
+  // the render phase is still running, so fall back to the next tick.
+  paint(cx) {
+    try { cx.notify(); }
+    catch { cx.timer.after(0, (cx) => cx.notify()); }
+  }
+
   // The palette key as actually bound, not a hardcoded one. Just the key:
   // the bar is tight, and "commands" was taking room the prompt can use.
   hint() {
@@ -138,13 +146,13 @@ export default class StatusBranch extends View {
     cx.spawn(async (cx) => {
       const r = await exec("git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: folder, on: space.machine }).catch(() => null);
       this.branches = r && r.code === 0 ? r.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : [];
-      cx.notify();
+      this.paint(cx);
     });
   }
 
   pick(name, cx) {
     this.open = false;
-    cx.notify();
+    this.paint(cx);
     const space = spaces().find((s) => s.active), folder = place(space);
     if (!folder) return;
     cx.spawn(async (cx) => {
@@ -153,7 +161,7 @@ export default class StatusBranch extends View {
       catch (e) { r = { code: 1, stderr: String(e), stdout: "" }; }
       if (r.code !== 0) notify({ title: "Cannot switch branch", body: (r.stderr || r.stdout || "git switch failed").trim(), level: "warning", timeout: 2600 });
       else notify({ title: "Branch switched", body: name, timeout: 1400 });
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -210,7 +218,10 @@ export default class StatusBranch extends View {
     this.promptClear = null;
   }
 
-  clearPrompt(cx) {
+  // `silent` is for the render pass: notify() throws while rendering, and the
+  // frame being built already shows the cleared line. Everywhere else the
+  // notification is what repaints it.
+  clearPrompt(cx, silent = false) {
     this.cancelPromptClear();
     if (!this.prompt && !this.promptFull) return;
     // What is shown belongs to an agent or tab that no longer owns the bar.
@@ -218,7 +229,7 @@ export default class StatusBranch extends View {
     this.promptFull = "";
     this.promptUnit = 0;
     this.clearMarquee();
-    cx.notify();
+    if (!silent) this.paint(cx);
   }
 
   // opencode quitting clears the agent a moment before the terminal settles:
@@ -233,7 +244,7 @@ export default class StatusBranch extends View {
     });
   }
 
-  refreshPrompt(cx) {
+  refreshPrompt(cx, silent = false) {
     const f = focused();
     const term = f?.terminal ?? null;
     const a = currentOpencodeAgent();
@@ -254,7 +265,7 @@ export default class StatusBranch extends View {
         if (!addr) this.schedulePromptClear(cx);
       } else {
         // Another tab or terminal: what is shown belongs to the old context.
-        this.clearPrompt(cx);
+        this.clearPrompt(cx, silent);
       }
     }
     if (!a) return;
@@ -281,7 +292,7 @@ export default class StatusBranch extends View {
       this.prompt = one;
       this.clearMarquee();
       this.promptUnit = 0;              // measure the new text before sliding
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -315,20 +326,20 @@ export default class StatusBranch extends View {
     if (!this.marqueeActive()) { this.clearMarquee(); return; }
     this.promptAnim = true;
     this.promptOffset = 0;
-    cx.notify();
+    this.paint(cx);
 
     const go = cx.timer.after(120, (cx) => {
-      if (!this.marqueeActive()) { this.clearMarquee(); cx.notify(); return; }
+      if (!this.marqueeActive()) { this.clearMarquee(); this.paint(cx); return; }
       this.promptOffset = -(this.promptUnit + MARQUEE_GAP);
-      cx.notify();
+      this.paint(cx);
 
       const done = cx.timer.after(this.marqueeMs + 60, (cx) => {
-        if (!this.marqueeActive()) { this.clearMarquee(); cx.notify(); return; }
+        if (!this.marqueeActive()) { this.clearMarquee(); this.paint(cx); return; }
         // Drop the transition in the same render as the reset, so it snaps
         // back instead of sliding right.
         this.promptAnim = false;
         this.promptOffset = 0;
-        cx.notify();
+        this.paint(cx);
         const next = cx.timer.after(120, (cx) => {
           if (this.marqueeActive()) this.runMarquee(cx);
         });
@@ -353,7 +364,7 @@ export default class StatusBranch extends View {
           .on_size_change((size, cx) => {
             if (Math.abs(size.width - this.promptUnit) > 0.5) {
               this.promptUnit = size.width;
-              cx.notify();
+              this.paint(cx);
               if (this.hoverPrompt) this.startMarquee(cx);
             }
           });
@@ -362,11 +373,11 @@ export default class StatusBranch extends View {
         if (hovered === this.hoverPrompt) return;
         this.hoverPrompt = hovered;
         if (hovered) {
-          cx.notify();
+          this.paint(cx);
           this.startMarquee(cx);
         } else {
           this.clearMarquee();
-          cx.notify();
+          this.paint(cx);
         }
       })
       .child(svg("mods/workspace-chrome/square-pen.svg").size(13).flex_none().text_color(t.dim))
@@ -374,7 +385,7 @@ export default class StatusBranch extends View {
         .on_size_change((size, cx) => {
           if (Math.abs(size.width - this.promptBox) > 0.5) {
             this.promptBox = size.width;
-            cx.notify();
+            this.paint(cx);
             if (this.hoverPrompt) this.startMarquee(cx);
           }
         })
@@ -401,9 +412,10 @@ export default class StatusBranch extends View {
   render(cx) {
     // Focus changes redraw at once; the prompt timer runs every 1.5 s. Catch
     // the change here so the old tab's prompt never lingers on screen.
+    // Silent: this pass is the repaint, and notify() is refused while rendering.
     const f = focused();
     if ((f?.terminal ?? null) !== this.promptTerm ||
-        (currentOpencodeAgent()?.address ?? null) !== this.promptAgent) this.refreshPrompt(cx);
+        (currentOpencodeAgent()?.address ?? null) !== this.promptAgent) this.refreshPrompt(cx, true);
     const t = theme();
     const space = spaces().find(s => s.active);
     const hint = this.hint();
@@ -420,7 +432,7 @@ export default class StatusBranch extends View {
       .when(Boolean(space?.machine), el => el.child(label("server", space.machine)))
       .when(Boolean(branch), el => el.child(
         Popover.new("status-branch").anchor("bottom_left").open(this.open)
-          .on_open_change((open, cx) => { this.open = open; if (open) this.load(cx); cx.notify(); })
+          .on_open_change((open, cx) => { this.open = open; if (open) this.load(cx); this.paint(cx); })
           .trigger(trigger(branch))
           .content(this.list(t))))
       .when(Boolean(cwd), el => el.child(
