@@ -1028,7 +1028,7 @@ export default class Git extends View {
 
   sectionRow(t, r) {
     if (r.kind === "empty") {
-      return h_flex().h(26).flex_none().pl(28).items_center().text_size(12).text_color(t.dim).child("No changes");
+      return h_flex().h(26).flex_none().pl(30).items_center().text_size(12).text_color(t.dim).child("No changes");
     }
     const actions = [];
     if (r.staged) actions.push(this.actionButton(`git-unall-${r.key}`, "minus", (cx) => this.unstageAll(cx), t));
@@ -1063,7 +1063,7 @@ export default class Git extends View {
       actions.push(this.actionButton(`git-di-${rowKey}`, "undo", (cx) => { this.confirm = rowKey; cx.notify(); }, t));
       actions.push(this.actionButton(`git-st-${rowKey}`, "plus", (cx) => this.stage(f, cx), t));
     }
-    return h_flex().id(`git-row-${rowKey}`).h(26).flex_none().pl(24).pr(6).gap(6).items_center().rounded(6).overflow_hidden()
+    return h_flex().id(`git-row-${rowKey}`).h(26).flex_none().pl(10).pr(6).gap(6).items_center().rounded(6).overflow_hidden()
       .when(selected, (e) => e.bg(t.selected))
       .when(!selected, (e) => e.hover((s) => s.bg(t.hover)))
       .on_hover((on, cx) => {
