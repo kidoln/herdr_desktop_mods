@@ -154,7 +154,11 @@ function numstat(out) {
 // pointing into old shared history does not repaint it. The geometry is plain
 // commands, so it can be exercised without a window; the row view turns each
 // into a stroke path. Design pixels: a row is 24 tall (see commitRow), lanes
-// are 14 apart, and the curves have radius 7.
+// are 14 apart, and the curves have radius 7. A row reserves only the lanes it
+// actually draws (not the widest in the whole list), so the subject sits the
+// same distance from its own dot as a file row's name sits from its status
+// letter; a list with one lane keeps the messages aligned with the file names
+// above it, and only the branchy rows step right to clear their extra lanes.
 const GRAPH = { x0: 5.5, pitch: 14, r: 7, line: 1.25 };
 const KAPPA = 0.5523;
 
@@ -206,10 +210,13 @@ function graphRows(commits, tipName, lampOf) {
   const X = (l) => GRAPH.x0 + l * GRAPH.pitch;
   const rows = commits.map(() => []);
   const lanes = commits.map(() => 0);
+  // The widest lane each row draws (its dot, the lines passing through it, and
+  // the curves leaving it): the row reserves exactly this much, so its subject
+  // stays close to its own dot.
+  const widest = commits.map(() => 0);
   const colors = commits.map(() => "dim");
   const vert = (r, l, y0, y1, color) => rows[r].push({ c: color, p: [["M", X(l), y0], ["L", X(l), y1]] });
   const active = [];   // lane -> { hash, color }: the line waiting there, or null
-  let maxLane = 0;
   for (let i = 0; i < commits.length; i++) {
     const c = commits[i], rd = GRAPH.r, k = rd * KAPPA;
     // The lines waiting for this commit, leftmost first: the first takes the dot.
@@ -220,7 +227,8 @@ function graphRows(commits, tipName, lampOf) {
       lc = active.findIndex((a) => !a);
       if (lc === -1) { lc = active.length; active.push(null); }
     }
-    lanes[i] = lc; if (lc > maxLane) maxLane = lc;
+    lanes[i] = lc;
+    let wide = lc;
     const own = near[i] ? lampOf(near[i]) : (c.owner ? lampOf(c.owner) : "dim");
     const incoming = waiting.length ? active[lc].color : own;
     const color = claim.get(i) ?? incoming;
@@ -230,6 +238,7 @@ function graphRows(commits, tipName, lampOf) {
     for (let l = 0; l < active.length; l++) {
       const a = active[l];
       if (!a || l === lc) continue;
+      if (l > wide) wide = l;
       if (a.hash === c.hash) {
         const xb = X(l), xa = X(lc);
         vert(i, l, 0, 12 - rd, a.color);
@@ -255,15 +264,16 @@ function graphRows(commits, tipName, lampOf) {
       let r = -1;
       for (let l = lc + 1; l < active.length; l++) if (!active[l]) { r = l; break; }
       if (r === -1) { r = active.length; active.push(null); }
-      if (r > maxLane) maxLane = r;
+      if (r > wide) wide = r;
       const side = near[j] ? lampOf(near[j]) : color;
       const xa = X(lc), xb = X(r);
       rows[i].push({ c: side, p: [["M", xa + 3, 12], ["L", xb - rd, 12], ["C", xb, 12 + rd, xb - rd + k, 12, xb, 12 + rd - k]] });
       vert(i, r, 12 + rd, 24, side);
       active[r] = { hash: c.parents[kk], color: side };
     }
+    widest[i] = wide;
   }
-  return { rows, lanes, colors, maxLane };
+  return { rows, lanes, widest, colors };
 }
 
 // One row's line pieces as a single stroke path. The pieces are in design
@@ -1228,10 +1238,15 @@ export default class Git extends View {
       const names = (c.tips ?? []).filter((n) => !this.picked.size || this.picked.has(n));
       return names.find((n) => n === this.branch) ?? names[0] ?? null;
     };
-    const { rows, lanes, colors, maxLane } = graphRows(commits, tipName, (n) => this.lampOf(n));
-    const width = GRAPH.x0 * 2 + maxLane * GRAPH.pitch;
+    const { rows, lanes, widest, colors } = graphRows(commits, tipName, (n) => this.lampOf(n));
     this._graph = { src: this.commits, picked,
-      rows: rows.map((items, i) => ({ x: GRAPH.x0 + lanes[i] * GRAPH.pitch, width, items, color: colors[i] })) };
+      rows: rows.map((items, i) => ({
+        x: GRAPH.x0 + lanes[i] * GRAPH.pitch,
+        // Just this row's lanes, with x0 of room on either side of the dot.
+        width: GRAPH.x0 * 2 + widest[i] * GRAPH.pitch,
+        items,
+        color: colors[i],
+      })) };
     return this._graph;
   }
 
@@ -1252,7 +1267,11 @@ export default class Git extends View {
   commitRow(t, c, g) {
     const open = this.commitView?.hash === c.hash;
     const isHead = c.hash === this.headSha;
-    const row = h_flex().id(`git-c-${c.hash}`).h(COMMIT_ROW_H).flex_none().px(10).gap(7).items_center().rounded(6).overflow_hidden()
+    // The subject begins where a file row's name does: 10 px of row padding +
+    // the one-lane graph column (11) + the 9 px gap is 30, exactly fileRow's
+    // 10 + 14 + 6. A row with more lanes reserves them and steps right just
+    // enough to keep the same distance from its own dot.
+    const row = h_flex().id(`git-c-${c.hash}`).h(COMMIT_ROW_H).flex_none().px(10).gap(9).items_center().rounded(6).overflow_hidden()
       .when(open, (e) => e.bg(t.selected))
       .when(!open, (e) => e.hover((s) => s.bg(t.hover)))
       // The press belongs to the row: a press anywhere else in the panel takes the
