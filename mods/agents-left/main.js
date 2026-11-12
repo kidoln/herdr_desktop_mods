@@ -2,8 +2,8 @@
 // A viewed done agent stays in Done until left.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, layout } from "herdr";
+import { v_flex, h_flex, Popup } from "gpui-base";
+import { agents, terminals, panes, focused, spaces, settings, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -88,7 +88,75 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
+    // Text widths by element id: what a text needs untruncated and what it got.
+    this.textWidths = {};
+    // The open hover tip: { id, at: { x, y } } in design px inside its row.
+    this.tip = null;
     cx.timer.every(30000, (cx) => cx.notify());
+  }
+
+  // A repaint from an on_size_change callback is refused while the render phase
+  // is still running, so it waits for the next tick.
+  paint(cx) {
+    try { cx.notify(); }
+    catch { cx.timer.after(0, (cx) => cx.notify()); }
+  }
+
+  noteWidth(id, kind, width, cx) {
+    const w = this.textWidths[id] ?? (this.textWidths[id] = { need: 0, got: 0 });
+    if (Math.abs(w[kind] - width) <= 0.5) return;
+    w[kind] = width;
+    this.paint(cx);
+  }
+
+  // True once the text needs more room than its box gives it, so a tooltip can
+  // say the whole of it.
+  cut(id) {
+    const w = this.textWidths[id];
+    return Boolean(w) && w.need > w.got + 0.5;
+  }
+
+  // A hidden copy of `text`, laid out without a width limit, reporting how wide
+  // it would be. Left inside the row so it inherits the row's font and size.
+  needs(id, text, cx) {
+    return div()
+      .id(`${id}-need`)
+      .absolute()
+      .left(-10000)
+      .top(0)
+      .whitespace_nowrap()
+      .opacity(0)
+      .on_size_change((size) => this.noteWidth(id, "need", size.width, cx))
+      .child(text);
+  }
+
+  // The open tip, drawn by the popup layer above the window: the popup's
+  // bottom-center is pinned to a 1×1 trigger at the pointer, so the whole text
+  // sits centered just above the cursor the moment the pointer rests on it.
+  hoverTip(t, id, text, open, size) {
+    const at = open ? this.tip.at : { x: 0, y: 0 };
+    return Popup.new(`tip-${id}`, div().id(`tip-at-${id}`).w(1).h(1).opacity(0))
+      .absolute()
+      .left(at.x)
+      .top(at.y)
+      .anchor("bottom_center")
+      .when(open, (el) => el.content(
+        div().max_w(360).px(9).py(6).rounded(7).bg(t.surface).border_1().border_color(t.border)
+          .text_size(size).line_height(1.4).text_color(t.foreground).child(text)));
+  }
+
+  // Opens the tip at the pointer, unless this one is already up.
+  openTip(id, x, y, cx) {
+    if (this.tip?.id === id) return;
+    this.tip = { id, at: { x, y: y - 8 - 20 / (this.unit || 1) } };
+    cx.notify();
+  }
+
+  // Closes the tip when the pointer leaves its row.
+  closeTip(id, hovered, cx) {
+    if (hovered || this.tip?.id !== id) return;
+    this.tip = null;
+    cx.notify();
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -209,13 +277,17 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, compact) {
+  subRow(t, s, shown, compact, cx) {
     const k = s.t;
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
+    const name = k.name || k.template || k.program?.name || k.address;
+    const nameId = `sub-name-${k.address}`;
+    const tipId = `sub-${k.address}`;
     return h_flex()
       .id(`sub-${k.address}`)
+      .relative()
       .pl(39)
       .pr(8)
       .rounded(8)
@@ -227,12 +299,19 @@ export default class Agents extends View {
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
       .on_click(() => this.peek(k.address))
+      .when(this.cut(nameId), (el) => el
+        .on_mouse_move((e, cx) => this.openTip(tipId, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
+        .on_hover((on, cx) => this.closeTip(tipId, on, cx)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .child(h_flex().w(14).mr(9).flex_none().items_center().justify_center().child(this.status(t, { status: st }, true)))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address));
+      .child(div().id(nameId).flex_1().truncate().text_color(on ? t.foreground : t.muted)
+        .on_size_change((size) => this.noteWidth(nameId, "got", size.width, cx))
+        .child(name))
+      .child(this.needs(nameId, name, cx))
+      .child(this.hoverTip(t, tipId, name, this.tip?.id === tipId, 12.5));
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
@@ -249,6 +328,8 @@ export default class Agents extends View {
   render(cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
+    // Mouse coordinates are window px; element sizes are design px.
+    this.unit = Number(settings()?.zoom) || 1;
     const collapsed = narrow();
     const sort = sortOf();
     let list = agents();
@@ -274,7 +355,7 @@ export default class Agents extends View {
       const subs = collapsed ? [] : this.tree(all, a.address);
       const r = row(a, i, subs);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority, cx))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -360,8 +441,14 @@ export default class Agents extends View {
       // Without a space header above (priority, pinned) the row names its space.
       const full = byPriority || isPinned;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
+      const nameId = `ag-name-${a.address}`;
+      const moreId = `ag-more-${a.address}`;
+      const cut = this.cut(nameId) || (full && Boolean(more) && this.cut(moreId));
+      const tipText = cut ? (full && more ? `${name} \u00b7 ${more}` : name) : null;
+      const tipId = `row-${a.address}`;
       return h_flex()
         .id(`ag-${a.address}`)
+        .relative()
         .px(8)
         .h(30)
         .flex_none()
@@ -385,9 +472,20 @@ export default class Agents extends View {
             this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
             cx.notify();
           })).child(pic)))
-        .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-          .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
-          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
+        .child(h_flex().id(`ag-label-${a.address}`).relative().h_full().flex_1().min_w(0).gap(5).items_center()
+          // A tip above the pointer, at once, once a part of the label no longer fits.
+          .when(tipText != null, (el) => el
+            .on_mouse_move((e, cx) => this.openTip(tipId, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
+            .on_hover((on, cx) => this.closeTip(tipId, on, cx)))
+          .child(this.hoverTip(t, tipId, tipText ?? "", this.tip?.id === tipId, 13))
+          .child(div().id(nameId).min_w(0).max_w(full && more ? 120 : 200).truncate()
+            .on_size_change((size) => this.noteWidth(nameId, "got", size.width, cx))
+            .text_color(idle ? t.muted : t.foreground).child(name))
+          .when(full && Boolean(more), el => el.child(div().id(moreId).flex_1().min_w(0).truncate()
+            .on_size_change((size) => this.noteWidth(moreId, "got", size.width, cx))
+            .text_color(t.dim).child(`\u00b7 ${more}`))))
+        .child(this.needs(nameId, name, cx))
+        .when(full && Boolean(more), el => el.child(this.needs(moreId, `\u00b7 ${more}`, cx)))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
