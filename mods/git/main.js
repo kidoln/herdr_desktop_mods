@@ -288,6 +288,17 @@ const shownLetter = (f, staged) => f.conflict ? "!" : staged ? f.x : f.untracked
 const letterText = (l) => (l === "?" ? "U" : l === " " ? "M" : l);
 const statusColor = (l, t) =>
   l === "U" || l === "?" || l === "A" ? t.ansi2 : l === "D" || l === "!" ? t.ansi1 : l === "R" || l === "C" ? t.ansi4 : t.blocked;
+// Git's relative date (`%ar`) reads "3 hours ago" / "5 minutes ago"; the
+// commits list shows the short forms "3h ago" / "5m ago".
+const shortWhen = (when) =>
+  (when ?? "")
+    .replace(/ seconds? /g, "s ")
+    .replace(/ minutes? /g, "m ")
+    .replace(/ hours? /g, "h ")
+    .replace(/ days? /g, "d ")
+    .replace(/ weeks? /g, "w ")
+    .replace(/ months? /g, "mo ")
+    .replace(/ years? /g, "y ");
 
 export default class Git extends View {
   init(_props, cx) {
@@ -1259,7 +1270,7 @@ export default class Git extends View {
       .child(this.gutter(t, g))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(c.subject || "(no subject)"))
       .children(this.rowChips(t, c, isHead, g))
-      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.when ?? ""));
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(shortWhen(c.when ?? "")));
     // Resting the pointer on the row opens the whole commit above it -- above,
     // where the click-opened detail below never covers it. The card owns its
     // delay and dismissal, so nothing here tracks the pointer or re-renders.
