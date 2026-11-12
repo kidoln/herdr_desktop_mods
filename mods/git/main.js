@@ -47,9 +47,16 @@
 // same click toggles the comparison off.
 // Clicking a commit does not push a detail panel under the list either: its message
 // and changed-file list open as an anchored surface right under that row, floating
-// over the commits below it. The same click toggles it off; so do Escape and a press
-// elsewhere in the panel. The surface's header carries the short hash -- the message
-// stays the body's, shown once -- with a button that copies the full SHA. Right-clicking
+// over the commits below it. The surface is the panel's own width -- it reads as a
+// widening of the row it sits under -- split into two scroll areas. The message
+// above takes its own measured height first: what it actually shows, wrapped -- a
+// short message makes a short top, none of it blank -- and a long one scrolls
+// inside it; the files below take what the surface has left and scroll on their
+// own. The divider between them drags, letting one part give the other room for
+// the commit that is open, and the next commit starts from its own measure again.
+// The same click toggles it off; so do Escape and a press elsewhere in the panel.
+// The surface's header carries the short hash -- the message stays the body's,
+// shown once -- with a button that copies the full SHA. Right-clicking
 // a commit takes the surface down before its context menu opens, so the two never stand
 // over the list together.
 // Opening a commit stays blob-free and fast: its message and changed-file names
@@ -157,6 +164,15 @@ const KAPPA = 0.5523;
 const COMMIT_ROW_H = 24;
 const LOG_PAD_Y = 4;
 const COMPACT_LOG_H = 3 * COMMIT_ROW_H + 2 * LOG_PAD_Y;
+
+// The commit popup's split: the message part above a draggable divider, the
+// changed files below. The message part takes its own measured height first --
+// a short message makes a short top -- and MSG_MIN_H / FILES_MIN_H hold the
+// ends of the split's range.
+const COMMIT_HEADER_H = 30;
+const COMMIT_SPLIT_H = 6;
+const MSG_MIN_H = 40;
+const FILES_MIN_H = 64;
 
 // `tipName(c)` names the branch tip on a commit (the branch that colors it),
 // `lampOf(name)` its lamp.
@@ -321,6 +337,10 @@ export default class Git extends View {
     // commit back to the top even after the list was scrolled far down.
     this.logScroll = ScrollHandle.new();
     this.resize = null; this.size = null; this.unit = 1;
+    // The commit popup's split: `msgH` is null until its divider is dragged, so
+    // the message part draws its own measured height (see commitPopup); `msgDrag`
+    // is the drag itself ({ startY, h }), like the log's resize.
+    this.msgH = null; this.msgDrag = null;
     this.message = ""; this.note = null; this.error = null; this.task = null;
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
@@ -350,6 +370,7 @@ export default class Git extends View {
     this.remotes = null; this.lamps = null; this.localRefs = []; this.remoteRefs = [];
     this.commitView = null; this.branchPick = false; this.picked = new Set();
     this.resize = null; this.confirm = null; this.confirmAll = false; this.hovered = null;
+    this.msgH = null; this.msgDrag = null;
     this.error = null; this.notRepo = false; this.note = null; this.limited = false;
     // A copy without one live space is a `herdr-app check` harness, not the
     // panel on screen: it must not clear what the panel published.
@@ -630,8 +651,12 @@ export default class Git extends View {
 
   pickCommit(c, cx) {
     this.branchPick = false;
-    const same = this.commitView?.hash === c.hash;
     this.note = null;
+    // A fresh split for a fresh commit: the drag belongs to the commit that was
+    // open when it happened, and the next commit starts from its own measured
+    // height again.
+    this.msgH = null; this.msgDrag = null;
+    const same = this.commitView?.hash === c.hash;
     if (same) { this.commitView = null; cx.notify(); return; }
     this.commitView = { hash: c.hash, short: c.short, subject: c.subject, body: "", files: [], loaded: false };
     const context = this.context;
@@ -650,7 +675,7 @@ export default class Git extends View {
     this.openDiff(target, cx);
   }
 
-  closeCommit(cx) { this.commitView = null; cx.notify(); }
+  closeCommit(cx) { this.commitView = null; this.msgH = null; this.msgDrag = null; cx.notify(); }
 
   // Every write goes through here: one at a time, then a refresh, errors inline.
   // `task` names the write for the buttons that show it running (the sync
@@ -1301,6 +1326,24 @@ export default class Git extends View {
     cx.notify();
   }
 
+  // The commit popup's divider: the message part takes more room as the pointer
+  // moves down (the files part gives it up), and gives it back as the pointer
+  // moves up, within the split's ends. The drag lasts for the commit that is
+  // open; the next commit draws its own measured height again (see pickCommit).
+  msgDragMove(e, cx) {
+    if (!this.msgDrag) return;
+    const maxH = Math.max(200, Math.min(460, Math.round((this.size?.height ?? 560) / this.unit) - 100));
+    const next = Math.round(Math.min(maxH - COMMIT_HEADER_H - COMMIT_SPLIT_H - FILES_MIN_H,
+      Math.max(MSG_MIN_H, this.msgDrag.h + (e.position.y - this.msgDrag.startY) / this.unit)));
+    if (next !== this.msgH) { this.msgH = next; cx.notify(); }
+  }
+
+  msgDragEnd(cx) {
+    if (!this.msgDrag) return;
+    this.msgDrag = null;
+    cx.notify();
+  }
+
   // The commits of the picked branches; while nothing is picked, all of them.
   shownCommits() {
     if (!this.picked.size) return this.commits;
@@ -1385,17 +1428,39 @@ export default class Git extends View {
     const files = c.files.slice(0, 800);
     const target = this.shownTarget();
     const isShown = (path) => Boolean(target) && target.mode === "commit" && target.commit === c.hash && target.path === path;
-    // The panel's own width and height, in design pixels (see `unit`), so the
-    // surface reads as a widening of the row: never wider than the panel, never
-    // taller than what fits above its bottom edge. The body caps its own height
-    // rather than flexing: the surface is sized by its content, so a flex-1
-    // child would contribute nothing and collapse.
-    const width = Math.max(240, Math.round((this.size?.width ?? 720) / this.unit) - 20);
-    const maxH = Math.max(160, Math.min(400, Math.round((this.size?.height ?? 560) / this.unit) - 110));
-    return v_flex().id("git-commit-pop").w(width).max_h(maxH).flex_none().rounded(8).bg(t.popover)
+    // The surface is the panel's own width -- it floats over the sidebar it sits
+    // in, so it reads as a widening of the row under it -- and split into two
+    // scroll areas with definite heights, the way the log and the file lists are
+    // (a content-sized box would have nothing to overflow, so it could not
+    // scroll). The message part takes its own measured height first: what it
+    // shows, wrapped to the surface's width, plus its padding -- a short message
+    // makes a short top, none of it blank -- and a long one scrolls inside that
+    // height. The files part takes what the surface has left: it shrinks the
+    // whole surface with it when there are few files, and scrolls when there are
+    // many. The divider between the two drags, so one part can give the other
+    // room; a drag lasts for the commit that is open (this.msgH), and the next
+    // commit starts from its own measure again.
+    const width = Math.max(240, Math.round((this.size?.width ?? 720) / this.unit));
+    const maxH = Math.max(200, Math.min(460, Math.round((this.size?.height ?? 560) / this.unit) - 100));
+    const textW = width - 24;
+    let lines = Math.max(1, Math.ceil(this.textWidth(c.subject || "(no subject)", 12) / textW));
+    if (c.body) for (const line of c.body.split("\n")) lines += Math.max(1, Math.ceil(this.textWidth(line, 11.5) / textW));
+    const maxMsgH = maxH - COMMIT_HEADER_H - COMMIT_SPLIT_H - FILES_MIN_H;
+    const msgH = Math.min(Math.max(this.msgH ?? Math.round(lines * 18 + 20 + (c.body ? 3 : 0)), MSG_MIN_H), maxMsgH);
+    const extra = (c.files.length > files.length ? 1 : 0) + (!c.loaded || !files.length ? 1 : 0);
+    const filesH = Math.min(files.length * 26 + 20 + extra * 26, maxH - COMMIT_HEADER_H - COMMIT_SPLIT_H - msgH);
+    const fileRow = (f) => h_flex().id(`git-cf-${f.path}`).h(26).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
+      .when(isShown(f.path), (e) => e.bg(t.selected))
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
+      .child(div().w(14).flex_none().text_center().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status))
+      .child(div().flex_1().min_w(0).truncate().child(f.path));
+    return v_flex().id("git-commit-pop").w(width).h(COMMIT_HEADER_H + msgH + COMMIT_SPLIT_H + filesH).flex_none().rounded(8).bg(t.popover)
       .border_1().border_color(t.input).overflow_hidden()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(h_flex().h(30).flex_none().pl(10).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
+      .on_mouse_move((e, cx) => this.msgDragMove(e, cx))
+      .on_mouse_up("left", (_e, cx) => this.msgDragEnd(cx))
+      .child(h_flex().h(COMMIT_HEADER_H).flex_none().pl(10).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("Commit"))
         // The header says which commit this is, not what it says: the message is
         // the body's first line, and the full SHA copies from the button.
@@ -1409,19 +1474,28 @@ export default class Git extends View {
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.closeCommit(cx); })
           .child(icon("close").size(13).text_color(t.dim))))
-      .child(v_flex().id("git-commit-body").max_h(maxH - 30).flex_none().overflow_y_scrollbar().p(10).gap(3)
+      // The message part: just tall enough for what it shows -- the subject and
+      // the body, wrapped -- scrolling inside that height when it outgrows it.
+      .child(v_flex().id("git-commit-msg").h(msgH).flex_none().overflow_y_scrollbar().p(10).gap(3)
         .child(div().text_size(12).font_semibold().text_color(t.foreground).child(c.subject || "(no subject)"))
-        .when(Boolean(c.body), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(c.body.slice(0, 4000))))
-        .child(div().h(4).flex_none())
-        .when(!c.loaded, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading\u2026")))
-        .when(c.loaded && !files.length, (e) => e.child(div().text_size(12).text_color(t.dim).child("No file changes")))
-        .children(files.map((f) =>
-          h_flex().id(`git-cf-${f.path}`).h(26).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
-            .when(isShown(f.path), (e) => e.bg(t.selected))
-            .hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
-            .child(div().w(14).flex_none().text_center().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status))
-            .child(div().flex_1().min_w(0).truncate().child(f.path))))
+        .when(Boolean(c.body), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(c.body.slice(0, 4000)))))
+      // The divider: drag it to give one part the other's room.
+      .child(div().id("git-commit-split").h(COMMIT_SPLIT_H).flex_none().w_full().cursor_row_resize()
+        .when(this.msgDrag, (s) => s.bg(t.accent))
+        .when(!this.msgDrag, (s) => s.hover((c) => c.bg(t.hover)))
+        .on_mouse_down("left", (ev, cx) => {
+          cx.stop_propagation();
+          this.msgDrag = { startY: ev.position.y, h: msgH };
+        })
+        .on_mouse_move((ev, cx) => this.msgDragMove(ev, cx))
+        .on_mouse_up("left", (_ev, cx) => this.msgDragEnd(cx)))
+      // The files part: every changed file, what the surface has left, scrolling
+      // its own way when the list is longer than it.
+      .child(v_flex().id("git-commit-files").h(filesH).flex_none().p(6).gap(2).border_t(1).border_color(t.border)
+        .overflow_y_scrollbar()
+        .when(!c.loaded, (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child("Loading\u2026")))
+        .when(c.loaded && !files.length, (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child("No file changes")))
+        .children(files.map(fileRow))
         .when(c.files.length > files.length, (e) => e.child(div().p(6).text_size(11).text_color(t.dim).child(`\u2026 and ${c.files.length - files.length} more`))));
   }
 
