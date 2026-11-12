@@ -5,7 +5,9 @@
 // focused pane is a mod), with the home folder shortened to "~", and the last
 // message sent to the shown tab's opencode agent (or the focused terminal's,
 // when that is one; never another tab's), read from opencode's own SQLite
-// state. Hovering that message crawls it right to left when it does not fit.
+// state. Hovering that message crawls it right to left when it does not fit;
+// pressing it opens the session's user messages above the bar, numbered in
+// the order they were sent.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
 import { spaces, agents, panes, terminals, exec, focused, home, notify, theme, run, window, keys } from "herdr";
@@ -14,6 +16,8 @@ const OPENCODE = "opencode";
 const PROMPT_MAX = 400;       // characters kept for the bar and the marquee
 const MARQUEE_GAP = 48;       // px of blank between the two copies of the text
 const MARQUEE_SPEED = 60;     // window px per second, a calm right-to-left crawl
+const MESSAGE_MENU_W = 460;   // px: wide enough to read, narrow enough not to span the screen
+const MESSAGE_MENU_MAX_H = 420;
 
 // The live folder of an agent, even when it has no pane of its own (a sub-agent).
 function agentCwd(a) {
@@ -72,6 +76,50 @@ function oneLine(text) {
   return chars.length > PROMPT_MAX ? chars.slice(0, PROMPT_MAX - 1).join("") + "…" : s;
 }
 
+// A message's send time, to the second.
+function sentAt(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const d = new Date(n);
+  const p = (v) => String(v).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// A message as flex items that may wrap: a Latin word, one CJK character, or
+// a long unbroken run split into chunks. A single text block reserves a column
+// for the timestamp; these items let the body use the whole width and the
+// timestamp sit after the last word instead.
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff00-\uffef]/u;
+function messageParagraphs(text) {
+  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  return lines.map((line) => {
+    const tokens = [];
+    let word = "";
+    const flush = () => {
+      if (!word) return;
+      // A URL or another unbroken run still needs a place to break.
+      for (let i = 0; i < word.length; i += 32) tokens.push(word.slice(i, i + 32));
+      word = "";
+    };
+    for (const ch of line) {
+      if (/\s/.test(ch)) {
+        // The space belongs to the word before it, so the break happens
+        // between words and the gap survives a wrap.
+        if (word) { flush(); tokens[tokens.length - 1] += "\u00a0"; }
+        else if (tokens.length) tokens[tokens.length - 1] += "\u00a0";
+        else word = "\u00a0";
+      } else if (CJK.test(ch)) {
+        flush();
+        tokens.push(ch);
+      } else {
+        word += ch;
+      }
+    }
+    flush();
+    return tokens.length ? tokens : ["\u00a0"];
+  });
+}
+
 // Where the active space is now: its first terminal's live folder, else where it
 // was made — the same place the bar's branch comes from.
 function place(space) {
@@ -102,6 +150,13 @@ export default class StatusBranch extends View {
     this.promptBusy = false;
     this.promptGen = 0;
     this.dataHomes = new Map();
+
+    // The prompt's message menu: every user message of the session, oldest
+    // first, read fresh when the line is pressed.
+    this.promptMenuOpen = false;
+    this.promptMessages = null;  // null until the first read
+    this.promptMsgError = false;
+    this.promptMsgGen = 0;
 
     // Hover marquee: two copies on one track, slid left by exactly one copy
     // per pass; at the end the second copy sits where the first began, so the
@@ -213,9 +268,60 @@ export default class StatusBranch extends View {
     return { ok: true, text: "" };
   }
 
+  // Every user message of the opencode session behind this terminal, oldest
+  // first. The same title-and-folder lookup as readOpencodePrompt, so the menu
+  // always belongs to the session whose last line the bar shows.
+  async readOpencodeMessages({ cwd, title, machine }) {
+    if (!cwd) return { ok: false, messages: [] };
+    const base = await this.dataHomeFor(machine);
+    if (!base) return { ok: false, messages: [] };
+    const db = `${base}/opencode/opencode.db`;
+    const esc = (s) => String(s).replaceAll("'", "''");
+    const select = (where) =>
+      `select m.time_created, m.data from session_message m where m.type='user' and m.session_id=` +
+      `(select s.id from session_v2 s where ${where} order by s.time_updated desc limit 1)` +
+      ` order by m.seq asc;`;
+    const run = async (sql) => {
+      const r = await exec("sqlite3", ["-readonly", "-json", db, sql], machine ? { on: machine } : {});
+      if (r.code !== 0) return { ok: false, messages: [] };
+      try {
+        const rows = JSON.parse(r.stdout.trim() || "[]");
+        const messages = [];
+        for (const row of rows) {
+          let msg;
+          try { msg = JSON.parse(row.data); } catch { continue; }
+          const text = typeof msg.text === "string" ? msg.text.trim() : "";
+          const files = Array.isArray(msg.files) ? msg.files.length : 0;
+          const at = Number(row.time_created ?? msg?.time?.created);
+          // A message may be only attached files; keep its place in the
+          // conversation even then, so the numbering matches what was sent.
+          messages.push({
+            text: text || (files ? `[${files} ${files === 1 ? "file" : "files"}]` : "(no text)"),
+            files,
+            at,
+          });
+        }
+        return { ok: true, messages };
+      } catch { return { ok: false, messages: [] }; }
+    };
+
+    let hit = title ? await run(select(`s.directory='${esc(cwd)}' and s.title='${esc(title)}'`)) : { ok: true, messages: [] };
+    if (hit.ok && !hit.messages.length) hit = await run(select(`s.directory='${esc(cwd)}'`));
+    return hit;
+  }
+
   cancelPromptClear() {
     try { this.promptClear?.cancel(); } catch {}
     this.promptClear = null;
+  }
+
+  // The menu is about one prompt line; when that line goes, so does the menu.
+  // Bumping the generation drops a read that is still in flight.
+  closePromptMenu() {
+    this.promptMenuOpen = false;
+    this.promptMessages = null;
+    this.promptMsgError = false;
+    this.promptMsgGen++;
   }
 
   // `silent` is for the render pass: notify() throws while rendering, and the
@@ -223,13 +329,55 @@ export default class StatusBranch extends View {
   // notification is what repaints it.
   clearPrompt(cx, silent = false) {
     this.cancelPromptClear();
+    this.closePromptMenu();
     if (!this.prompt && !this.promptFull) return;
     // What is shown belongs to an agent or tab that no longer owns the bar.
     this.prompt = "";
     this.promptFull = "";
     this.promptUnit = 0;
+    // The line the pointer was on is gone with it; its exit event may never
+    // come, and a stale "hovered" would start the next line's crawl by itself.
+    this.hoverPrompt = false;
     this.clearMarquee();
     if (!silent) this.paint(cx);
+  }
+
+  // The prompt's menu reads the whole session on opening, not on every bar
+  // tick: the menu is meant to be a stable, complete list while it is up.
+  loadPromptMessages(cx) {
+    const a = currentOpencodeAgent();
+    if (!a) {
+      this.promptMessages = [];
+      this.paint(cx);
+      return;
+    }
+    const gen = ++this.promptMsgGen;
+    const cwd = agentCwd(a);
+    const machine = agentMachine(a);
+    const title = opencodeTitle(a);
+    this.promptMsgError = false;
+    cx.spawn(async (cx) => {
+      let res = { ok: false, messages: [] };
+      try { res = await this.readOpencodeMessages({ cwd, title, machine }); } catch {}
+      if (gen !== this.promptMsgGen) return;
+      this.promptMsgError = !res.ok;
+      this.promptMessages = res.ok ? res.messages : [];
+      this.paint(cx);
+    });
+  }
+
+  setPromptMenu(open, cx) {
+    this.promptMenuOpen = open;
+    if (open) {
+      this.promptMessages = null;  // show Loading… while the read runs
+      this.promptMsgError = false;
+      this.loadPromptMessages(cx);
+    } else {
+      this.promptMsgGen++;  // a late read is no longer wanted
+      this.promptMessages = null;
+      this.promptMsgError = false;
+    }
+    this.paint(cx);
   }
 
   // opencode quitting clears the agent a moment before the terminal settles:
@@ -288,10 +436,18 @@ export default class StatusBranch extends View {
       const text = res.text;
       const one = oneLine(text);
       if (one === this.prompt && text === this.promptFull) return;
+      // A line that is going away cannot stay hovered.
+      if (!one) {
+        this.hoverPrompt = false;
+        // A fresh session has no message yet; the old session's menu is not
+        // this session's conversation.
+        this.closePromptMenu();
+      }
       this.promptFull = text;
       this.prompt = one;
       this.clearMarquee();
       this.promptUnit = 0;              // measure the new text before sliding
+      if (one && this.promptMenuOpen) this.loadPromptMessages(cx);
       this.paint(cx);
     });
   }
@@ -350,6 +506,50 @@ export default class StatusBranch extends View {
     this.marqueeTasks.push(go);
   }
 
+  // One message body. Its words are separate wrapping items, so the text runs
+  // edge to edge instead of leaving a column for the time. The last word and
+  // the time travel together, so the time stays appended to the message.
+  messageBody(t, msg, at) {
+    const paragraphs = messageParagraphs(msg.text);
+    return v_flex().flex_1().min_w(0).gap(0)
+      .children(paragraphs.map((tokens, p) => {
+        const last = p === paragraphs.length - 1;
+        const tail = last && at ? tokens[tokens.length - 1] : null;
+        const rest = tail ? tokens.slice(0, -1) : tokens;
+        return h_flex().w_full().min_w(0).flex_wrap().items_baseline().gap(0)
+          .children(rest.map((token) =>
+            div().flex_none().whitespace_nowrap().text_color(t.foreground).child(token)))
+          .when(Boolean(tail), (el) => el.child(
+            h_flex().flex_none().items_baseline().gap(0)
+              .child(div().whitespace_nowrap().text_color(t.foreground).child(tail))
+              .child(div().whitespace_nowrap().pl(6).text_size(10.5).text_color(t.dim).child(at))));
+      }));
+  }
+
+  // The menu above the bar: every user message of this session, oldest first
+  // and numbered from one. It scrolls once it would cover too much of the
+  // window; the width is fixed so long prompts wrap instead of stretching.
+  promptMenu(t) {
+    const rows = this.promptMessages;
+    const count = rows?.length ?? 0;
+    const empty = (text) => div().p(8).text_color(t.dim).child(text);
+    return v_flex().id("status-prompt-menu").w(MESSAGE_MENU_W).max_h(MESSAGE_MENU_MAX_H).overflow_y_scrollbar().p(4)
+      .rounded(8).bg(t.popover).border_1().border_color(t.input).text_size(12).text_color(t.foreground)
+      .child(h_flex().flex_none().px(8).pt(4).pb(6).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().flex_1().min_w(0).text_color(t.muted).child("Session messages"))
+        .when(rows !== null && !this.promptMsgError, (el) => el.child(div().text_size(10.5).text_color(t.dim).child(String(count)))))
+      .when(rows === null && !this.promptMsgError, (el) => el.child(empty("Loading…")))
+      .when(this.promptMsgError, (el) => el.child(empty("Cannot read this session")))
+      .when(rows !== null && !this.promptMsgError && !rows.length, (el) => el.child(empty("No messages")))
+      .children((rows ?? []).map((msg, i) => {
+        const at = sentAt(msg.at);
+        return h_flex().id(`status-prompt-message-${i}`).flex_none().px(8).py(6).gap(8).items_start()
+          .when(i < count - 1, (el) => el.border_b(1).border_color(t.border))
+          .child(div().flex_none().w(22).text_size(11).text_color(t.dim).child(`${i + 1}.`))
+          .child(this.messageBody(t, msg, at));
+      }));
+  }
+
   promptView(t) {
     const sliding = this.marqueeActive();
     const copy = (id, pad) => h_flex().id(id).flex_none().whitespace_nowrap().items_center()
@@ -368,17 +568,22 @@ export default class StatusBranch extends View {
               if (this.hoverPrompt) this.startMarquee(cx);
             }
           });
-    return h_flex().id("status-prompt").flex_1().min_w(0).h_full().gap(6).items_center()
+    const trigger = h_flex().id("status-prompt").flex_1().min_w(0).h_full().gap(6).items_center().cursor_pointer()
+      // Starting on hover entry is wrong: a line that appears under a pointer
+      // resting at the bar is reported as hovered without the pointer ever
+      // moving here, and the crawl then runs on its own. Movement on the line
+      // is the only sure sign the pointer is really on it. Leaving is still
+      // the ordinary exit event.
+      .on_mouse_move((_event, cx) => {
+        if (this.hoverPrompt) return;
+        this.hoverPrompt = true;
+        this.startMarquee(cx);
+      })
       .on_hover((hovered, cx) => {
-        if (hovered === this.hoverPrompt) return;
-        this.hoverPrompt = hovered;
-        if (hovered) {
-          this.paint(cx);
-          this.startMarquee(cx);
-        } else {
-          this.clearMarquee();
-          this.paint(cx);
-        }
+        if (hovered || !this.hoverPrompt) return;
+        this.hoverPrompt = false;
+        this.clearMarquee();
+        this.paint(cx);
       })
       .child(svg("mods/workspace-chrome/square-pen.svg").size(13).flex_none().text_color(t.dim))
       .child(h_flex().flex_1().min_w(0).h_full().relative().overflow_hidden().items_center()
@@ -390,6 +595,12 @@ export default class StatusBranch extends View {
           }
         })
         .child(inner));
+    // bottom_left pins the menu's bottom edge to the line's top: it opens
+    // upwards, over the panes, with its left edge on the prompt icon.
+    return Popover.new("status-prompt-menu").anchor("bottom_left").open(this.promptMenuOpen)
+      .on_open_change((open, cx) => this.setPromptMenu(open, cx))
+      .trigger(trigger)
+      .content(this.promptMenu(t));
   }
 
   list(t) {
