@@ -41,6 +41,16 @@ function opencodeTitle(a) {
   return i >= 0 ? title.slice(i + 3) : title;
 }
 
+// The session's summary as the agents sidebar shows it after the agent's name:
+// the terminal title with its command prefix gone (`OC | fix login` -> `fix
+// login`). Keep the two in step; both read opencode's own title.
+function sessionSummary(a) {
+  return opencodeTitle(a)
+    .replace(/^[^\p{L}\p{N}]+/u, "")
+    .replace(/^[\w.-]{1,16}\s*\|\s*/u, "")
+    .trim();
+}
+
 function isOpencode(a) {
   return a?.app === OPENCODE || a?.program?.key === OPENCODE;
 }
@@ -157,6 +167,7 @@ export default class StatusBranch extends View {
     this.promptMessages = null;  // null until the first read
     this.promptMsgError = false;
     this.promptMsgGen = 0;
+    this.promptMenuClosedAt = 0;  // a press that closed it must not reopen it
 
     // Hover marquee: two copies on one track, slid left by exactly one copy
     // per pass; at the end the second copy sits where the first began, so the
@@ -169,6 +180,7 @@ export default class StatusBranch extends View {
     this.marqueeMs = 0;
     this.marqueePolicy = null;
     this.marqueeTasks = [];
+    this.marqueePass = 0;   // a fresh track per pass: no stale transition state
 
     cx.timer.every(1500, (cx) => this.refreshPrompt(cx));
     this.refreshPrompt(cx);
@@ -367,6 +379,7 @@ export default class StatusBranch extends View {
   }
 
   setPromptMenu(open, cx) {
+    if (!open) this.promptMenuClosedAt = Date.now();
     this.promptMenuOpen = open;
     if (open) {
       this.promptMessages = null;  // show Loading… while the read runs
@@ -466,9 +479,12 @@ export default class StatusBranch extends View {
     this.promptOffset = 0;
   }
 
-  // One pass moves the track left by one copy plus the gap. The transition
-  // has to be on the element for a rendered frame before `left` changes:
-  // adding both in the same render makes GPUI jump to the target.
+  // One pass moves a copied track left by one copy plus the gap. The track is
+  // rebuilt for every pass with a new id: a reused element can carry the
+  // previous pass's animated value, and re-adding its transition then makes
+  // the reset look like a jump back to the head. A fresh track starts at 0
+  // (the same frame the old track ends on, since its second copy is there),
+  // so the swap is invisible and the next pass can follow at once.
   startMarquee(cx) {
     this.clearMarquee();
     if (!this.marqueeActive()) return;
@@ -480,28 +496,25 @@ export default class StatusBranch extends View {
 
   runMarquee(cx) {
     if (!this.marqueeActive()) { this.clearMarquee(); return; }
+    this.marqueePass++;
     this.promptAnim = true;
     this.promptOffset = 0;
     this.paint(cx);
 
-    const go = cx.timer.after(120, (cx) => {
+    // The transition has to be on the element for a rendered frame before
+    // `left` changes; adding both in one render jumps to the target.
+    const go = cx.timer.after(50, (cx) => {
       if (!this.marqueeActive()) { this.clearMarquee(); this.paint(cx); return; }
       this.promptOffset = -(this.promptUnit + MARQUEE_GAP);
       this.paint(cx);
 
-      const done = cx.timer.after(this.marqueeMs + 60, (cx) => {
+      const next = cx.timer.after(this.marqueeMs + 50, (cx) => {
         if (!this.marqueeActive()) { this.clearMarquee(); this.paint(cx); return; }
-        // Drop the transition in the same render as the reset, so it snaps
-        // back instead of sliding right.
-        this.promptAnim = false;
-        this.promptOffset = 0;
-        this.paint(cx);
-        const next = cx.timer.after(120, (cx) => {
-          if (this.marqueeActive()) this.runMarquee(cx);
-        });
-        this.marqueeTasks.push(next);
+        // The old track's second copy is now where a fresh first copy sits,
+        // so starting the next pass needs no visibility gap.
+        this.runMarquee(cx);
       });
-      this.marqueeTasks.push(done);
+      this.marqueeTasks.push(next);
     });
     this.marqueeTasks.push(go);
   }
@@ -532,11 +545,12 @@ export default class StatusBranch extends View {
   promptMenu(t) {
     const rows = this.promptMessages;
     const count = rows?.length ?? 0;
+    const summary = sessionSummary(currentOpencodeAgent());
     const empty = (text) => div().p(8).text_color(t.dim).child(text);
     return v_flex().id("status-prompt-menu").w(MESSAGE_MENU_W).max_h(MESSAGE_MENU_MAX_H).overflow_y_scrollbar().p(4)
       .rounded(8).bg(t.popover).border_1().border_color(t.input).text_size(12).text_color(t.foreground)
       .child(h_flex().flex_none().px(8).pt(4).pb(6).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().flex_1().min_w(0).text_color(t.muted).child("Session messages"))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).when(Boolean(summary), (el) => el.tooltip(summary)).child(summary || "Session messages"))
         .when(rows !== null && !this.promptMsgError, (el) => el.child(div().text_size(10.5).text_color(t.dim).child(String(count)))))
       .when(rows === null && !this.promptMsgError, (el) => el.child(empty("Loading…")))
       .when(this.promptMsgError, (el) => el.child(empty("Cannot read this session")))
@@ -556,10 +570,10 @@ export default class StatusBranch extends View {
       .when(pad, (el) => el.pl(MARQUEE_GAP))
       .child(this.prompt);
     const inner = sliding
-      ? h_flex().id("status-prompt-track").absolute().left(this.promptOffset).top(0).h_full().flex_nowrap().items_center()
+      ? h_flex().id(`status-prompt-track-${this.marqueePass}`).absolute().left(this.promptOffset).top(0).h_full().flex_nowrap().items_center()
           .when(this.promptAnim, (el) => el.transition("left", this.marqueePolicy ?? { duration: this.marqueeMs, easing: "linear" }))
-          .child(copy("status-prompt-a", false))
-          .child(copy("status-prompt-b", true))
+          .child(copy(`status-prompt-a-${this.marqueePass}`, false))
+          .child(copy(`status-prompt-b-${this.marqueePass}`, true))
       : div().id("status-prompt-static").flex_none().whitespace_nowrap().child(this.prompt)
           .on_size_change((size, cx) => {
             if (Math.abs(size.width - this.promptUnit) > 0.5) {
@@ -568,7 +582,18 @@ export default class StatusBranch extends View {
               if (this.hoverPrompt) this.startMarquee(cx);
             }
           });
-    const trigger = h_flex().id("status-prompt").flex_1().min_w(0).h_full().gap(6).items_center().cursor_pointer()
+    // The popover's trigger is just the icon: a Popover is not a normal flex
+    // child, so making the whole line its trigger left the text at its
+    // intrinsic width and pushed the palette key off the right edge. The line
+    // below is a plain flex child that takes the free width.
+    const trigger = svg("mods/workspace-chrome/square-pen.svg").size(13).flex_none().text_color(t.dim);
+    const surface = Popover.new("status-prompt-menu").anchor("bottom_left").open(this.promptMenuOpen)
+      .on_open_change((open, cx) => this.setPromptMenu(open, cx))
+      .trigger(trigger)
+      .content(this.promptMenu(t));
+    // bottom_left pins the menu's bottom edge to the icon's bottom: it opens
+    // upwards, over the panes, with its left edge on the prompt icon.
+    return h_flex().id("status-prompt").flex_1().min_w(0).h_full().gap(6).items_center().cursor_pointer()
       // Starting on hover entry is wrong: a line that appears under a pointer
       // resting at the bar is reported as hovered without the pointer ever
       // moving here, and the crawl then runs on its own. Movement on the line
@@ -585,7 +610,7 @@ export default class StatusBranch extends View {
         this.clearMarquee();
         this.paint(cx);
       })
-      .child(svg("mods/workspace-chrome/square-pen.svg").size(13).flex_none().text_color(t.dim))
+      .child(surface)
       .child(h_flex().flex_1().min_w(0).h_full().relative().overflow_hidden().items_center()
         .on_size_change((size, cx) => {
           if (Math.abs(size.width - this.promptBox) > 0.5) {
@@ -594,13 +619,18 @@ export default class StatusBranch extends View {
             if (this.hoverPrompt) this.startMarquee(cx);
           }
         })
-        .child(inner));
-    // bottom_left pins the menu's bottom edge to the line's top: it opens
-    // upwards, over the panes, with its left edge on the prompt icon.
-    return Popover.new("status-prompt-menu").anchor("bottom_left").open(this.promptMenuOpen)
-      .on_open_change((open, cx) => this.setPromptMenu(open, cx))
-      .trigger(trigger)
-      .content(this.promptMenu(t));
+        .child(inner)
+        // The text is outside the Popover's trigger (the icon), so it opens
+        // the controlled surface itself. The surface must be opened after the
+        // press: opened during it, a fresh Popover reads that same press as an
+        // outside one and dismisses at once. A press that just closed the open
+        // menu (reported before this click) must not re-open it.
+        .child(div().id("status-prompt-hit").absolute().left(0).right(0).top(0).bottom(0).cursor_pointer()
+          .on_click((_e, cx) => {
+            if (Date.now() - this.promptMenuClosedAt < 300) return;
+            if (this.promptMenuOpen) { this.setPromptMenu(false, cx); return; }
+            cx.timer.after(0, (cx) => this.setPromptMenu(true, cx));
+          })));
   }
 
   list(t) {
@@ -652,6 +682,6 @@ export default class StatusBranch extends View {
           .child(div().max_w(360).truncate().child(short(cwd)))))
       .child(this.prompt ? this.promptView(t) : div().flex_1().min_w(0))
       .when(Boolean(hint), el => el.child(
-        div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(hint)));
+        div().id("palette").flex_none().text_color(t.dim).on_click(() => run("app.palette")).child(hint)));
   }
 }
