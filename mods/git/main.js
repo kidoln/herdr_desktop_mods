@@ -110,6 +110,14 @@ const inside = (root, cwd) => {
 // The same read flags Files and Changes use: no index refresh, no lock, no
 // fsmonitor cookie, so watching the repository does not see our own reads.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+// A read that never comes back -- its task went away with a hidden copy, or a
+// command hung past every timeout -- would otherwise hold its folder in `loads`
+// for the panel's whole life: that folder would never be read again and the
+// panel would keep showing whatever folder it read last (one other space's,
+// when the folder in focus is the stuck one). Past this age the entry is
+// dropped and the folder is read again. A read is a dozen short git commands,
+// so this only ever catches one that is not coming back.
+const READ_STALE = 45000;
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/git/${name}.svg`).flex_none();
 // The working state of a button: a ring with an arc that turns once every 900 ms.
@@ -377,8 +385,9 @@ export default class Git extends View {
     this.message = ""; this.note = null; this.error = null;
     // Writes are tracked per repository, not per panel: one running here keeps
     // only this repository still, while a switch to another shows it at once.
-    // `loads` maps the folder being read to its read's token, so a switch can
-    // start its own read without the old one's end clearing the new one's mark.
+    // `loads` maps the folder being read to its read's token and start, so a
+    // switch can start its own read without the old one's end clearing the new
+    // one's mark, and a read that never lands expires (see READ_STALE).
     this.ops = new Map(); this.loads = new Map(); this.readSeq = 0; this.pendingRefresh = null;
     this.initCtx = null; this.watchGen = 0;
     this.handle = cx.focus_handle();
@@ -399,7 +408,10 @@ export default class Git extends View {
   get task() { return this.op?.task ?? null; }
   // Whether the folder in focus is being read right now (each folder has its
   // own read, so a switch is not "loading" the folder it left behind).
-  get loading() { return this.loads ? this.loads.has(ctxKey()) : false; }
+  get loading() {
+    const held = this.loads?.get(ctxKey());
+    return Boolean(held) && Date.now() - held.at < READ_STALE;
+  }
   // `git init` has no repository yet, so it is tracked by the folder it runs in.
   get initing() { return this.initCtx !== null && this.initCtx === ctxKey(); }
 
@@ -483,14 +495,18 @@ export default class Git extends View {
     // waiting for the one in flight (that one's result is dropped when it lands,
     // because it tests the context it was started for). A switch back to a
     // folder whose earlier read is still in flight reads once more when it
-    // lands, so the panel shows the state now, not before the trip.
-    if (this.loads.has(context)) {
+    // lands, so the panel shows the state now, not before the trip. A read
+    // older than READ_STALE is not coming back; it is dropped and its folder
+    // read again rather than waiting on it for good.
+    const held = this.loads.get(context);
+    if (held && Date.now() - held.at < READ_STALE) {
       if (switched) this.pendingRefresh = context;
       return;
     }
+    if (held) this.loads.delete(context);
     if (!cwd) { this.clear(); return; }
     const token = ++this.readSeq;
-    this.loads.set(context, token);
+    this.loads.set(context, { token, at: Date.now() });
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
@@ -644,7 +660,7 @@ export default class Git extends View {
         }
       } catch (e) { if (ctxKey() === context) this.error = String(e); }
       finally {
-        if (this.loads.get(context) === token) {
+        if (this.loads.get(context)?.token === token) {
           this.loads.delete(context);
           // A write that landed (or a switch back) while this read was in flight
           // asked for one more read now that it is in; read again only if the
