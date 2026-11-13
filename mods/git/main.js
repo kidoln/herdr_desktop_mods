@@ -35,6 +35,10 @@
 // A running write reads so: the Commit and Pull & Push buttons turn their glyph
 // into a spinning arc while their command runs, and the ahead/behind counters and
 // Publish do the same, so a slow fetch reads as work rather than a dead button. A
+// write belongs to the repository it runs in, not to the panel: switching to
+// another project reads and shows that one at once, its buttons live, while the
+// write lands in the background (a failure that lands out of sight is a toast,
+// since the strip belongs to the repository on screen). A
 // write that fails puts git's own message in a strip along the panel's bottom edge,
 // and the strip's X takes it down -- Escape too, and the next write replaces it --
 // so a refusal no longer waits for a change of folder to clear.
@@ -94,6 +98,14 @@ function location() {
   return loc;
 }
 const ctxKey = () => JSON.stringify(location());
+// A write belongs to one repository: the same folder on the same machine.
+const repoKey = (on, root) => `${on ?? ""}\0${root ?? ""}`;
+// Whether `cwd` is `root` or a folder inside it (either separator, so a remote
+// Windows path works too).
+const inside = (root, cwd) => {
+  const r = String(root ?? "").replace(/[\\/]+$/, "");
+  return Boolean(cwd) && Boolean(r) && (cwd === r || cwd.startsWith(`${r}/`) || cwd.startsWith(`${r}\\`));
+};
 
 // The same read flags Files and Changes use: no index refresh, no lock, no
 // fsmonitor cookie, so watching the repository does not see our own reads.
@@ -362,7 +374,13 @@ export default class Git extends View {
     // the message part draws its own measured height (see commitPopup); `msgDrag`
     // is the drag itself ({ startY, h }), like the log's resize.
     this.msgH = null; this.msgDrag = null;
-    this.message = ""; this.note = null; this.error = null; this.task = null;
+    this.message = ""; this.note = null; this.error = null;
+    // Writes are tracked per repository, not per panel: one running here keeps
+    // only this repository still, while a switch to another shows it at once.
+    // `loads` maps the folder being read to its read's token, so a switch can
+    // start its own read without the old one's end clearing the new one's mark.
+    this.ops = new Map(); this.loads = new Map(); this.readSeq = 0; this.pendingRefresh = null;
+    this.initCtx = null; this.watchGen = 0;
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
     this.input.on("change", (_e, cx) => { this.message = this.input.value(); cx.notify(); });
@@ -373,13 +391,46 @@ export default class Git extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
 
+  // The write running in the shown repository, if any. A write in another
+  // repository is invisible here: its buttons are live, no arc turns, and the
+  // panel follows the folder in focus while it lands in the background.
+  get op() { return this.ops?.get(repoKey(this.on, this.root)) ?? null; }
+  get busy() { return Boolean(this.op); }
+  get task() { return this.op?.task ?? null; }
+  // Whether the folder in focus is being read right now (each folder has its
+  // own read, so a switch is not "loading" the folder it left behind).
+  get loading() { return this.loads ? this.loads.has(ctxKey()) : false; }
+  // `git init` has no repository yet, so it is tracked by the folder it runs in.
+  get initing() { return this.initCtx !== null && this.initCtx === ctxKey(); }
+
+  // Whether a write in `root` on `on` belongs to the folder in focus now: the
+  // panel still follows that repository (it may only have `cd`'d inside it) and
+  // keeps its note strip for the failure. A folder elsewhere gets a toast.
+  sameRepo(root, on) {
+    const { cwd, on: curOn } = location();
+    return Boolean(cwd) && (curOn ?? null) === (on ?? null) && inside(root, cwd);
+  }
+
+  // Whether a write is running in the repository `cwd` is in on `on`: reads of
+  // that repository wait for the write, reads of any other do not.
+  writeCovers(cwd, on) {
+    if (!cwd) return false;
+    for (const op of this.ops.values()) {
+      if ((op.on ?? null) === (on ?? null) && inside(op.root, cwd)) return true;
+    }
+    return false;
+  }
+
   watch(root, cx) {
     if (this.on || this.watched === root) return;
     this.watched = root;
-    const context = this.context;
+    // A folder watch belongs to the visit that started it: switching away and
+    // back starts one watch, and the old one ends at its next event instead of
+    // running beside it.
+    const gen = ++this.watchGen;
     cx.spawn(async (cx) => {
-      try { while (this.context === context) { await watchFolder(root); if (this.context === context) this.refresh(cx); } }
-      catch { if (this.context === context) this.watched = null; }
+      try { while (this.watchGen === gen) { await watchFolder(root); if (this.watchGen === gen) this.refresh(cx); } }
+      catch { if (this.watchGen === gen) this.watched = null; }
     });
   }
 
@@ -412,19 +463,34 @@ export default class Git extends View {
   }
 
   refresh(cx) {
-    if (this.loading || this.busy) return;
     const { cwd, on } = location(), context = ctxKey();
-    if (context !== this.context) {
+    const switched = context !== this.context;
+    // A write keeps the repository it runs in still until it lands (its end
+    // reads again). It never holds the panel on that repository: a switch to
+    // another folder is read and shown at once, the write running on behind.
+    if (!switched && this.writeCovers(cwd, on)) return;
+    if (switched) {
       // The folder the panel follows changed. The read below replaces what is on
       // screen in one step; clearing first would flash the empty state for the
       // length of the read (and a `cd` inside one repository, which changes
       // nothing the panel shows, would flash too).
       this.context = context;
       this.watched = null;   // the old folder's watch loop ends by itself
+      this.watchGen += 1;    // ... at its next event, even if the folder comes back
       this.resize = null;    // a drag belongs to the panel that was on screen
     }
+    // One read per folder at a time; a switch starts its own read rather than
+    // waiting for the one in flight (that one's result is dropped when it lands,
+    // because it tests the context it was started for). A switch back to a
+    // folder whose earlier read is still in flight reads once more when it
+    // lands, so the panel shows the state now, not before the trip.
+    if (this.loads.has(context)) {
+      if (switched) this.pendingRefresh = context;
+      return;
+    }
     if (!cwd) { this.clear(); return; }
-    this.loading = true;
+    const token = ++this.readSeq;
+    this.loads.set(context, token);
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
@@ -577,7 +643,19 @@ export default class Git extends View {
           catch (e) { if (ctxKey() === context) this.note = `Cannot read this commit: ${e}`; }
         }
       } catch (e) { if (ctxKey() === context) this.error = String(e); }
-      finally { this.loading = false; cx.notify(); }
+      finally {
+        if (this.loads.get(context) === token) {
+          this.loads.delete(context);
+          // A write that landed (or a switch back) while this read was in flight
+          // asked for one more read now that it is in; read again only if the
+          // panel still follows this folder.
+          if (this.pendingRefresh === context) {
+            this.pendingRefresh = null;
+            if (ctxKey() === context) { this.refresh(cx); return; }
+          }
+        }
+        cx.notify();
+      }
     });
   }
 
@@ -698,18 +776,41 @@ export default class Git extends View {
 
   closeCommit(cx) { this.commitView = null; this.msgH = null; this.msgDrag = null; cx.notify(); }
 
-  // Every write goes through here: one at a time, then a refresh, errors inline.
+  // Every write goes through here: one at a time per repository, then a refresh,
+  // errors inline. Another repository's panel stays live while it runs, and a
+  // failure that lands after the panel moved on reads as a notification instead
+  // (the strip belongs to the repository on screen).
   // `task` names the write for the buttons that show it running (the sync
   // button's arc, the ahead/behind counters, Publish); null means no button
   // does.
   mutate(cx, fn, task) {
     if (this.busy || !this.root) return;
-    const root = this.root, on = this.on, context = this.context;
-    this.busy = true; this.task = task ?? null; this.note = null; cx.notify();
+    const root = this.root, on = this.on, key = repoKey(on, root);
+    if (this.ops.has(key)) return;
+    this.ops.set(key, { task: task ?? null, root, on });
+    this.note = null; cx.notify();
     cx.spawn(async (cx) => {
+      let failure = null;
       try { await fn(root, on); }
-      catch (e) { if (ctxKey() === context) this.note = String(e); }
-      finally { this.busy = false; this.task = null; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
+      catch (e) { failure = String(e); }
+      finally {
+        this.ops.delete(key);
+        const shown = this.sameRepo(root, on);
+        if (failure) {
+          if (shown) this.note = failure;
+          else {
+            const name = { commit: "Commit", push: "Push", pull: "Pull", sync: "Pull & Push" }[task];
+            notify({ title: name ? `Git: ${name} failed` : "Git failed", body: failure, level: "error" });
+          }
+        }
+        if (shown) {
+          // A read of this folder already running may have seen the write
+          // mid-flight; ask for one clean read once it lands.
+          if (this.loads.has(this.context)) this.pendingRefresh = this.context;
+          else this.refresh(cx);
+        }
+        cx.notify();
+      }
     });
   }
 
@@ -753,18 +854,18 @@ export default class Git extends View {
   }
 
   // The empty state's button: make the shown folder a repository and read it
-  // again. `mutate` is about a repository, so the write runs here with the same
-  // one-at-a-time busy flag; the folder is read at the press, like refresh does,
-  // so a changed focus inits where the panel is looking now.
+  // again. `mutate` is about a repository that already exists, so the write runs
+  // here with a flag of its own; the folder is read at the press, like refresh
+  // does, so a changed focus inits where the panel is looking now.
   initRepo(cx) {
-    if (this.busy || this.loading) return;
+    if (this.initing || this.loading) return;
     const { cwd, on } = location(), context = ctxKey();
     if (!cwd) return;
-    this.busy = true; this.note = null; cx.notify();
+    this.initCtx = context; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try { this.fail(await exec("git", ["init"], { cwd, on }), "git init failed"); }
       catch (e) { if (ctxKey() === context) this.note = String(e); }
-      finally { this.busy = false; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
+      finally { if (this.initCtx === context) this.initCtx = null; if (ctxKey() === context) this.refresh(cx); cx.notify(); }
     });
   }
 
@@ -1335,8 +1436,8 @@ export default class Git extends View {
       // A folder with no repository offers to make one. While `git init` runs the
       // button names the work and does nothing; the panel refreshes when it lands.
       .when(this.notRepo, (e) => e.child(
-        this.textButton("git-init", this.busy ? "Initializing\u2026" : "Initialize Repository",
-          this.busy ? t.raised : t.solid, this.busy ? t.dim : t.solid_foreground, (cx) => this.initRepo(cx), t)
+        this.textButton("git-init", this.initing ? "Initializing\u2026" : "Initialize Repository",
+          this.initing ? t.raised : t.solid, this.initing ? t.dim : t.solid_foreground, (cx) => this.initRepo(cx), t)
           .mt(4)));
   }
 
