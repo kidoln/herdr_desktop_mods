@@ -64,6 +64,8 @@ const TIER = { [RANK.blocked]: 0, [RANK.done]: 1, [RANK.working]: 2 };
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
+// A short rest of the pointer before a cut name's tip opens.
+const TIP_DELAY = 350;
 
 function duration(ms) {
   const m = Math.floor(ms / 60000);
@@ -92,6 +94,8 @@ export default class Agents extends View {
     this.textWidths = {};
     // The open hover tip: { id, at: { x, y } } in design px inside its row.
     this.tip = null;
+    // A tip still waiting out TIP_DELAY: { id, at, task }.
+    this.tipWait = null;
     cx.timer.every(30000, (cx) => cx.notify());
   }
 
@@ -135,26 +139,50 @@ export default class Agents extends View {
   // sits centered just above the cursor the moment the pointer rests on it.
   hoverTip(t, id, text, open, size) {
     const at = open ? this.tip.at : { x: 0, y: 0 };
+    // The text that opened the tip is kept with it: a measurement at the
+    // truncation edge can stop calling the text cut on a later paint, and the
+    // tip must not turn into an empty box under the pointer. Prefer the text
+    // this paint has, so a title that changes while the tip is up stays true.
+    const body = open ? text || this.tip.text : "";
     return Popup.new(`tip-${id}`, div().id(`tip-at-${id}`).w(1).h(1).opacity(0))
       .absolute()
       .left(at.x)
       .top(at.y)
       .anchor("bottom_center")
-      .when(open, (el) => el.content(
+      .when(Boolean(body), (el) => el.content(
         div().max_w(360).px(9).py(6).rounded(7).bg(t.surface).border_1().border_color(t.border)
-          .text_size(size).line_height(1.4).text_color(t.foreground).child(text)));
+          .text_size(size).line_height(1.4).text_color(t.foreground).child(body)));
   }
 
-  // Opens the tip at the pointer, unless this one is already up.
-  openTip(id, x, y, cx) {
-    if (this.tip?.id === id) return;
-    this.tip = { id, at: { x, y: y - 8 - 20 / (this.unit || 1) } };
-    cx.notify();
+  // Opens the tip at the pointer after a short rest, unless this one is
+  // already up. Moving inside the row keeps its clock and moves the tip.
+  openTip(id, text, x, y, cx) {
+    if (!text || this.tip?.id === id) return;
+    const at = { x, y: y - 8 - 20 / (this.unit || 1) };
+    if (this.tipWait?.id === id) {
+      this.tipWait.at = at;
+      this.tipWait.text = text;
+      return;
+    }
+    this.tipWait?.task.cancel();
+    const wait = (this.tipWait = { id, at, text });
+    wait.task = cx.timer.after(TIP_DELAY, (cx) => {
+      if (this.tipWait !== wait) return;
+      this.tipWait = null;
+      this.tip = { id, at: wait.at, text: wait.text };
+      cx.notify();
+    });
   }
 
-  // Closes the tip when the pointer leaves its row.
+  // Drops a tip still waiting, and closes the open one when the pointer leaves
+  // its row.
   closeTip(id, hovered, cx) {
-    if (hovered || this.tip?.id !== id) return;
+    if (hovered) return;
+    if (this.tipWait?.id === id) {
+      this.tipWait.task.cancel();
+      this.tipWait = null;
+    }
+    if (this.tip?.id !== id) return;
     this.tip = null;
     cx.notify();
   }
@@ -300,7 +328,7 @@ export default class Agents extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => this.peek(k.address))
       .when(this.cut(nameId), (el) => el
-        .on_mouse_move((e, cx) => this.openTip(tipId, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
+        .on_mouse_move((e, cx) => this.openTip(tipId, name, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
         .on_hover((on, cx) => this.closeTip(tipId, on, cx)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
@@ -473,9 +501,9 @@ export default class Agents extends View {
             cx.notify();
           })).child(pic)))
         .child(h_flex().id(`ag-label-${a.address}`).relative().h_full().flex_1().min_w(0).gap(5).items_center()
-          // A tip above the pointer, at once, once a part of the label no longer fits.
+          // A tip above the pointer after a short rest, once a part of the label no longer fits.
           .when(tipText != null, (el) => el
-            .on_mouse_move((e, cx) => this.openTip(tipId, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
+            .on_mouse_move((e, cx) => this.openTip(tipId, tipText, e.local_position.x / this.unit, e.local_position.y / this.unit, cx))
             .on_hover((on, cx) => this.closeTip(tipId, on, cx)))
           .child(this.hoverTip(t, tipId, tipText ?? "", this.tip?.id === tipId, 13))
           .child(div().id(nameId).min_w(0).max_w(full && more ? 120 : 200).truncate()
