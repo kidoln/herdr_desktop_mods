@@ -1,8 +1,8 @@
 # Herdr 桌面增强 mods · Herdr Desktop Mods
 
-> 一套 [Herdr](https://herdr.dev) 自定义 mod + 窗口布局：除了 Git 工作台（VS Code 风格的源代码管理面板、并排 diff、就地编辑、分支切换），还带来了更完整的文件管理（多选、右键菜单、重命名/复制/粘贴/删除、按类型着色的文件图标、图片预览）和改版的 Agents 列表、标签栏、可收成图标栏的侧栏与状态栏（含 opencode 提问）。
+> 一套 [Herdr](https://herdr.dev) 自定义 mod + 窗口布局：除了 Git 工作台（VS Code 风格的源代码管理面板、并排 diff、就地编辑、分支切换），还带来了更完整的文件管理（多选、右键菜单、重命名/复制/粘贴/删除、按类型着色的文件图标、图片预览）和改版的 Agents 列表、标签栏、可收成图标栏的侧栏与状态栏（含 opencode / Claude Code 提问）。
 >
-> A set of custom [Herdr](https://herdr.dev) mods plus a window layout: a Git workspace (a VS Code-style Source Control panel, side-by-side diffs, in-place editing, branch switching) — and beyond Git, a fuller file manager (selection, context menu, rename/copy/paste/delete, file-type icons, image preview) and a reworked agents list, tab bar, collapsible icon-rail sidebar and status bar (with the opencode prompt).
+> A set of custom [Herdr](https://herdr.dev) mods plus a window layout: a Git workspace (a VS Code-style Source Control panel, side-by-side diffs, in-place editing, branch switching) — and beyond Git, a fuller file manager (selection, context menu, rename/copy/paste/delete, file-type icons, image preview) and a reworked agents list, tab bar, collapsible icon-rail sidebar and status bar (with the opencode / Claude Code prompt).
 
 [中文](#zh) · [English](#en)
 
@@ -27,27 +27,27 @@
 
 装上这个布局后，窗口是这样的：
 
-| 区域 | 内容 |
-|---|---|
+| 区域   | 内容                                                                                                                                       |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | 左侧栏 | 空间列表（`spaces-rail`）、Agents 列表（`agents-left`）、底部工具条（`workspace-chrome-rail`）；窄于 160px 时切换为图标栏（收起时为 52px） |
-| 顶部 | 标签栏（`tabs-git`）：标签 + Files / Git 面板开关；Git 开关带待处理文件数徽标 |
-| 主区 | 终端 / diff / 编辑器 / 图片标签页，面板带常显的标题栏 |
-| 右侧栏 | Files / Git 面板轮换（`files-menu`、`git`） |
-| 底部 | 状态栏（`status-branch`）：分支切换、实时目录、opencode 最后一条提问 |
+| 顶部   | 标签栏（`tabs-git`）：标签 + Files / Git 面板开关；Git 开关带待处理文件数徽标                                                              |
+| 主区   | 终端 / diff / 编辑器 / 图片标签页，面板带常显的标题栏                                                                                      |
+| 右侧栏 | Files / Git 面板轮换（`files-menu`、`git`）                                                                                                |
+| 底部   | 状态栏（`status-branch`）：分支切换、实时目录、opencode / Claude Code 最后一条提问                                                         |
 
 ### 9 个 mod
 
-| mod | 来源 | 作用 |
-|---|---|---|
-| `git` | 全新 | 源代码管理面板：提交框、Staged/Changes、分支与 upstream、提交历史图 |
-| `git-diff` | 全新 | diff 标签页：并排对比 / 单栏折叠，可从 diff 转入编辑 |
-| `file-view` | 全新 | 文件编辑 / 图片查看标签页（从 Files 面板打开） |
-| `files-menu` | 基于自带 `files` 改编 | 文件浏览器：多选、右键菜单、重命名/复制/粘贴/删除、类型图标、Git 状态标记 |
-| `status-branch` | 基于自带 `workspace-status` 改编 | 状态栏：分支切换、实时目录、opencode 提问 |
-| `agents-left` | 基于自带 `agents` 改编 | 状态图标前置、去掉标题命令前缀的 Agents 列表 |
-| `tabs-git` | 基于自带 `tabs` 改编 | 标签栏上的 Files / Git 面板开关（Git 带待处理数徽标） |
-| `spaces-rail` | 基于自带 `spaces` 改编 | 空间列表：窄栏时显示彩色首字母、状态点与对齐的编号 |
-| `workspace-chrome-rail` | 基于自带 `workspace-chrome` 改编 | 52px 侧栏工具条：去掉 logo / 字标，收起时只留图标 |
+| mod                     | 来源                             | 作用                                                                      |
+| ----------------------- | -------------------------------- | ------------------------------------------------------------------------- |
+| `git`                   | 全新                             | 源代码管理面板：提交框、Staged/Changes、分支与 upstream、提交历史图       |
+| `git-diff`              | 全新                             | diff 标签页：并排对比 / 单栏折叠，可从 diff 转入编辑                      |
+| `file-view`             | 全新                             | 文件编辑 / 图片查看标签页（从 Files 面板打开）                            |
+| `files-menu`            | 基于自带 `files` 改编            | 文件浏览器：多选、右键菜单、重命名/复制/粘贴/删除、类型图标、Git 状态标记 |
+| `status-branch`         | 基于自带 `workspace-status` 改编 | 状态栏：分支切换、实时目录、opencode / Claude Code 提问                   |
+| `agents-left`           | 基于自带 `agents` 改编           | 状态图标前置、去掉标题命令前缀的 Agents 列表                              |
+| `tabs-git`              | 基于自带 `tabs` 改编             | 标签栏上的 Files / Git 面板开关（Git 带待处理数徽标）                     |
+| `spaces-rail`           | 基于自带 `spaces` 改编           | 空间列表：窄栏时显示彩色首字母、状态点与对齐的编号                        |
+| `workspace-chrome-rail` | 基于自带 `workspace-chrome` 改编 | 52px 侧栏工具条：去掉 logo / 字标，收起时只留图标                         |
 
 #### `git` — 源代码管理面板
 
@@ -92,9 +92,9 @@
 
 - **分支**：状态栏里的分支是按钮：点开显示当前仓库的本地分支列表（当前分支高亮 + 勾选），选择即执行 `git switch`，成功/失败都有通知。每次打开都重新读取分支列表。
 - **目录**：显示聚焦终端的实时目录，主目录简写为 `~`；聚焦的是 mod 面板时退回该空间的目录，远程 space 前会显示机器名。
-- **opencode 提问**：状态栏显示聚焦终端里 opencode 会话的最后一条用户消息（压成一行，最多 400 字符）。它只跟随聚焦终端，不会借用其他标签页的会话；数据直接读 opencode 自己的 SQLite（会话标题 + 实时目录，标题为空时取该目录最近更新的会话），每 1.5 秒刷新；opencode 退出时保留片刻再清空。
+- **opencode / Claude Code 提问**：状态栏显示聚焦终端里当前 agent 会话的最后一条用户输入（压成一行，最多 400 字符）。它只跟随聚焦终端，不会借用其他标签页的会话；数据都来自 agent 自己的状态文件，不需要装 hook：opencode 读它的 SQLite（会话标题 + 实时目录，标题为空时取该目录最近更新的会话），Claude Code 读它自己的 `history.jsonl` 末尾（用终端前台进程的 pid 在 `~/.claude/sessions/<pid>.json` 里找到会话，找不到时退回该目录最新的 transcript），每 1.5 秒刷新；agent 退出时保留片刻再清空。
 - **悬停滚动**：消息宽过状态栏时，鼠标移动到上面才从右向左缓慢滚动，移开即停；每轮首尾无缝衔接。
-- **会话消息**：点击提示文字（或它左边的图标）会在状态栏上方弹出该会话的全部用户消息，按发送顺序编号并附发送时间；标题显示会话摘要，列表固定宽度、超高时滚动。新会话还没有消息时不显示这一行。
+- **会话消息**：点击提示文字（或它左边的图标）会在状态栏上方弹出该会话的全部用户消息，按发送顺序编号并附发送时间；标题显示会话摘要（opencode 用它的标题，Claude Code 用会话名），列表固定宽度、超高时滚动（最多 400 条）。Claude Code 的消息取自它自己的 transcript（只保留人输入的行），读不到时退回 `history.jsonl`。新会话还没有消息时不显示这一行。
 
 #### `agents-left` — Agents 列表
 
@@ -123,12 +123,12 @@
 - **点开**：面板把目标写入共享状态（`git.diff` = 仓库 + 文件 + 模式，`files.view` = 文件），主区的 `git-diff` / `file-view` 标签页读取并显示；每个空间只保留一个同类标签，换目标就地更新并改标签名，还没有标签时新建一个。
 - **再点关闭**：点击正在显示的同一文件会关闭对应标签页，同一个点击就是开关。
 - **侧栏**：`spaces-rail` 与 `workspace-chrome-rail` 按侧栏宽度（<160px）判断是否进入图标栏；宽度由布局本身决定，拖动边缘也会触发。
-- **徽标与提示**：`git` 把待处理数写进 `git.counts`，标签栏据此显示徽标；`status-branch` 直接读 opencode 的 SQLite，显示最后一条提问和整段会话消息。
+- **徽标与提示**：`git` 把待处理数写进 `git.counts`，标签栏据此显示徽标；`status-branch` 直接读 opencode 的 SQLite / Claude Code 的会话文件，显示最后一条提问和整段会话消息。
 - 所有 mod 都跟随「聚焦终端的目录」，并在对应机器上执行命令（git、sh 或 PowerShell）——本机或远程 space 都一样。
 
 ### 安装
 
-先决条件：较新版本的 Herdr（本项目在 macOS 上以 0.1.15 开发并测试）；需要用到 git 的机器上装有 git；状态栏的 opencode 提问还需要 `sqlite3` 和正在使用的 opencode（数据从它自己的 SQLite 里读）。
+先决条件：较新版本的 Herdr（本项目在 macOS 上以 0.1.15 开发并测试）；需要用到 git 的机器上装有 git；状态栏的 opencode 提问还需要 `sqlite3` 和正在使用的 opencode（数据从它自己的 SQLite 里读），Claude Code 提问只要机器上有 `tail` / `grep`（macOS、Linux 自带）和正在使用的 Claude Code。
 
 ```sh
 # 1) 克隆到任意位置
@@ -158,8 +158,8 @@ herdr-app do layout.switch --name herdr-git
 
 - 操作以鼠标为主，不额外占用快捷键（git 面板里 Cmd/Ctrl+Enter 提交）。
 - 这些 mod 是受信任代码：会调用 `git`、shell / PowerShell 执行操作，安装前请知悉。
-- 状态栏的 opencode 提问使用 `sqlite3 -readonly` 读取 opencode 的会话数据库；没有 opencode 或 `sqlite3` 时这一行不显示，其余状态栏照常工作。
-- 已知上限：提交历史窗口 120 条；diff 600 KB / 4000 行；文件树每目录 500 条、总计 5000 条、深度 40；图片预览本机 32 MiB / 远程 6 MiB（缓存保留最近 16 份）；opencode 提示压成 400 字符，消息弹层最高 420px。
+- 状态栏的 opencode 提问使用 `sqlite3 -readonly` 读取 opencode 的会话数据库；Claude Code 提问读它自己的 `history.jsonl` 和 transcript（用 `tail` / `grep`），并通过 `hc get` 拿终端的前台 pid 来定位会话。对应的 agent 没在跑、或机器上缺命令时这一行不显示，其余状态栏照常工作；两者都不需要安装 hook。
+- 已知上限：提交历史窗口 120 条；diff 600 KB / 4000 行；文件树每目录 500 条、总计 5000 条、深度 40；图片预览本机 32 MiB / 远程 6 MiB（缓存保留最近 16 份）；提问提示压成 400 字符，消息弹层最高 420px、最多 400 条。
 
 ### 许可
 
@@ -184,27 +184,27 @@ Changes to built-in mods live as **clones**: the modified agents list is `agents
 
 The window looks like this:
 
-| Area | Content |
-|---|---|
+| Area         | Content                                                                                                                                                        |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Left sidebar | Spaces list (`spaces-rail`), agents list (`agents-left`), footer toolbar (`workspace-chrome-rail`); below 160px it switches to an icon rail (52px when folded) |
-| Top | Tab bar (`tabs-git`): tabs + Files / Git panel buttons; Git carries a pending-file badge |
-| Main area | Terminal / diff / editor / image tabs; every pane keeps a header |
-| Right panel | Files / Git stack (`files-menu`, `git`) |
-| Bottom | Status bar (`status-branch`): branch switch, live folder, the last opencode prompt |
+| Top          | Tab bar (`tabs-git`): tabs + Files / Git panel buttons; Git carries a pending-file badge                                                                       |
+| Main area    | Terminal / diff / editor / image tabs; every pane keeps a header                                                                                               |
+| Right panel  | Files / Git stack (`files-menu`, `git`)                                                                                                                        |
+| Bottom       | Status bar (`status-branch`): branch switch, live folder, the last opencode / Claude Code prompt                                                               |
 
 ### The nine mods
 
-| mod | Origin | What it does |
-|---|---|---|
-| `git` | new | Source Control panel: commit box, Staged/Changes, branch + upstream, commit graph |
-| `git-diff` | new | Diff tab: side-by-side / folded one-column, can turn into an editor |
-| `file-view` | new | File editing / image viewing tab (opened from the Files panel) |
-| `files-menu` | fork of `files` | File browser: selection, context menu, rename/copy/paste/delete, type icons, Git marks |
-| `status-branch` | fork of `workspace-status` | Status bar: branch switch, live folder, opencode prompt |
-| `agents-left` | fork of `agents` | Agents list with the status chip leading each row and command prefixes stripped |
-| `tabs-git` | fork of `tabs` | Files / Git panel buttons in the tab bar (Git with a pending-file badge) |
-| `spaces-rail` | fork of `spaces` | Spaces list: colored initials, status dots and aligned numbers in the rail |
-| `workspace-chrome-rail` | fork of `workspace-chrome` | 52px sidebar toolbar: no logo / wordmark, icons only when folded |
+| mod                     | Origin                     | What it does                                                                           |
+| ----------------------- | -------------------------- | -------------------------------------------------------------------------------------- |
+| `git`                   | new                        | Source Control panel: commit box, Staged/Changes, branch + upstream, commit graph      |
+| `git-diff`              | new                        | Diff tab: side-by-side / folded one-column, can turn into an editor                    |
+| `file-view`             | new                        | File editing / image viewing tab (opened from the Files panel)                         |
+| `files-menu`            | fork of `files`            | File browser: selection, context menu, rename/copy/paste/delete, type icons, Git marks |
+| `status-branch`         | fork of `workspace-status` | Status bar: branch switch, live folder, opencode / Claude Code prompt                  |
+| `agents-left`           | fork of `agents`           | Agents list with the status chip leading each row and command prefixes stripped        |
+| `tabs-git`              | fork of `tabs`             | Files / Git panel buttons in the tab bar (Git with a pending-file badge)               |
+| `spaces-rail`           | fork of `spaces`           | Spaces list: colored initials, status dots and aligned numbers in the rail             |
+| `workspace-chrome-rail` | fork of `workspace-chrome` | 52px sidebar toolbar: no logo / wordmark, icons only when folded                       |
 
 #### `git` — the Source Control panel
 
@@ -249,9 +249,9 @@ The window looks like this:
 
 - **Branch**: the branch in the status bar is a button: pressing it drops the repository's local branch list (the current one highlighted and checked); picking one runs `git switch`, with a toast either way. The list is read fresh on every open.
 - **Folder**: the focused terminal's live folder, with home shortened to `~`; a mod pane falls back to its space's folder, and a remote space shows its machine name first.
-- **opencode prompt**: the bar shows the newest user message of the opencode session in the focused terminal (folded to one line, up to 400 characters). It only follows the focused terminal — never another tab's session; the data comes straight from opencode's own SQLite (session title plus live folder, else the folder's most recently changed session), refreshed every 1.5 s; a quitting opencode holds the line for a moment before clearing it.
+- **opencode / Claude Code prompt**: the bar shows the newest user input of the current agent session in the focused terminal (folded to one line, up to 400 characters). It only follows the focused terminal — never another tab's session. Both agents' own state files are read, with no hook to install: opencode's SQLite (session title plus live folder, else the folder's most recently changed session), and Claude Code's own `history.jsonl` tail (the terminal's foreground pid names the session in `~/.claude/sessions/<pid>.json`; without one, the folder's newest transcript is used), refreshed every 1.5 s; a quitting agent holds the line for a moment before clearing it.
 - **Hover marquee**: a message wider than the bar crawls right to left only while the pointer moves over it, and stops when the pointer leaves; each pass joins seamlessly to the next.
-- **Session messages**: pressing the prompt text (or the icon beside it) opens every user message of that session above the bar, oldest first, numbered and stamped with its send time; the header shows the session summary, and the fixed-width list scrolls when it is tall. A fresh session with no message shows no line.
+- **Session messages**: pressing the prompt text (or the icon beside it) opens every user message of that session above the bar, oldest first, numbered and stamped with its send time; the header shows the session summary (opencode's title, or Claude Code's session name), and the fixed-width list scrolls when it is tall (up to 400 messages). Claude Code's messages come from its transcript (person lines only), falling back to `history.jsonl`. A fresh session with no message shows no line.
 
 #### `agents-left` — the agents list
 
@@ -280,12 +280,12 @@ The window looks like this:
 - **Click to open**: a panel publishes its target into shared state (`git.diff` = repo + path + mode, `files.view` = file), and the `git-diff` / `file-view` tab in the main area reads it; one tab of each kind serves a space, updating it in place and renaming it when the target changes, and opening a new tab when none is up.
 - **Click again to close**: clicking the file already shown closes that tab, so the same click is a toggle.
 - **Sidebar**: `spaces-rail` and `workspace-chrome-rail` go by the sidebar's width (below 160px) rather than a flag, so dragging the edge into the rail works too; folding sets it to 52px.
-- **Badge and prompt**: `git` publishes its pending counts into `git.counts`, which the tab bar badges; `status-branch` reads opencode's SQLite directly for the last prompt and the session's messages.
+- **Badge and prompt**: `git` publishes its pending counts into `git.counts`, which the tab bar badges; `status-branch` reads opencode's SQLite and Claude Code's session files directly for the last prompt and the session's messages.
 - Everything follows the focused terminal's folder and runs commands (git, sh or PowerShell) on that machine — local or a remote space alike.
 
 ### Install
 
-Requirements: a recent Herdr (developed and tested on macOS against 0.1.15); git installed wherever it will be used; the status bar's opencode prompt also needs `sqlite3` and a running opencode (it reads its own SQLite).
+Requirements: a recent Herdr (developed and tested on macOS against 0.1.15); git installed wherever it will be used; the status bar's opencode prompt also needs `sqlite3` and a running opencode (it reads its own SQLite), while the Claude Code prompt only needs `tail` / `grep` on the machine (built into macOS and Linux) and a running Claude Code.
 
 ```sh
 # 1) Clone anywhere
@@ -315,8 +315,8 @@ herdr-app do layout.switch --name herdr-git
 
 - Mouse-first: no keybindings are taken (except Cmd/Ctrl+Enter to commit in the git panel).
 - These mods are trusted code: they run `git` and shell / PowerShell commands.
-- The status bar's opencode prompt reads opencode's session database with `sqlite3 -readonly`; without opencode or `sqlite3` that line stays empty and the rest of the bar works as usual.
-- Known bounds: the history window is 120 commits; diffs cap at 600 KB / 4000 lines; the file tree lists 500 entries per folder, 5,000 in total, 40 levels deep; image previews cap at 32 MiB locally / 6 MiB remotely (the last 16 copies are kept); the opencode prompt folds to 400 characters and its message list is at most 420px tall.
+- The status bar's opencode prompt reads opencode's session database with `sqlite3 -readonly`; the Claude Code prompt reads Claude's own `history.jsonl` and transcripts with `tail` / `grep`, and asks `hc get` for the terminal's foreground pid to find the session. Without the running agent or those commands the line stays empty and the rest of the bar works as usual; neither agent needs a hook installed.
+- Known bounds: the history window is 120 commits; diffs cap at 600 KB / 4000 lines; the file tree lists 500 entries per folder, 5,000 in total, 40 levels deep; image previews cap at 32 MiB locally / 6 MiB remotely (the last 16 copies are kept); the prompt folds to 400 characters and its message list is at most 420px tall and 400 messages.
 
 ### License
 
