@@ -12,7 +12,7 @@ function find(node, id) {
 }
 
 export default class Tabs extends View {
-  init() {
+  init(props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     // Window widening: the panel is paid for by growing the window, not by
@@ -21,29 +21,110 @@ export default class Tabs extends View {
     this.wantGrown = false;
     this.resizes = Promise.resolve();
     this.clickedPanel = null;
-    this.panelSync = false;
-    this.liveBusy = false;
-    this.pendingDelta = null;
+    // While a close is in flight (set in closePanel), the panel can still be
+    // painted; the window must not grow back to it in the meantime.
+    this.closing = null;
     this.baseWidth = Number(localStorage.getItem("window.base")) || null;
     this.grownWidth = Number(localStorage.getItem("window.grown")) || null;
+    // The compiled helper resizes in ~40ms; the AppleScript fallback needs a
+    // few hundred, which is the difference between a single frame and a visible
+    // one. Until it is built (or if it cannot be), window.js does the work.
+    this.resizer = false;
+    cx.spawn(async (cx) => {
+      this.resizer = await this.buildResizer();
+      if (this.resizer) cx.notify();
+    });
   }
 
-  // Herdr has no command for the OS window; System Events is the only way.
+  // How much wider the window must be for the panel to take its place without
+  // squeezing the terminal: its rendered width plus the gap the panel row puts
+  // before it, at the window's zoom. The panel's rendered width is its layout
+  // size clamped to min/max — a stored drag below the minimum still renders at
+  // the minimum, so the raw size alone would undercount.
   windowDelta() {
     const root = layout();
     const panel = find(root, "panel");
     const body = find(root, "work-body");
-    const px = typeof panel?.size?.px === "number" ? panel.size.px : 368;
-    const gap = typeof body?.gap === "number" ? body.gap : 8;
+    const wanted = typeof panel?.size?.px === "number" ? panel.size.px : 0;
+    const min = typeof panel?.min === "number" ? panel.min : 0;
+    const max = typeof panel?.max === "number" ? panel.max : Infinity;
+    const px = Math.min(max, Math.max(min, wanted));
+    const gap = typeof body?.gap === "number" ? body.gap : 0;
     const zoom = typeof settings().zoom === "number" ? settings().zoom : 1;
     return Math.round((px + gap) * zoom * 10) / 10;
   }
 
+  // Herdr has no command for the OS window; Accessibility is the only way.
+  // winsize.swift is built once into the mod's data folder: calling it costs a
+  // process start and one AX call, where osascript first starts a whole
+  // AppleScript runtime. That speed is what lets the panel go before the window
+  // moves, instead of a few frames after.
+  async buildResizer() {
+    const home = this.home();
+    const binary = `${home}/data/tabs-git/winsize`;
+    // Keep in step with winsize.swift: the helper prints its own version, so a
+    // changed source is never shadowed by an older build.
+    const version = 1;
+    if (await this.helperVersion(binary) === version) return true;
+    try {
+      const source = `${home}/mods/tabs-git/winsize.swift`;
+      await exec("/bin/mkdir", ["-p", `${home}/data/tabs-git`], { timeout: 5000 });
+      let out = await exec("/usr/bin/xcrun", ["swiftc", "-O", source, "-o", binary], { timeout: 120000 });
+      if (out.code !== 0) out = await exec("/usr/bin/swiftc", ["-O", source, "-o", binary], { timeout: 120000 });
+      if (out.code !== 0) return false;
+    } catch (error) {
+      console.log("tabs-git: window helper unavailable, using AppleScript:", error?.message ?? error);
+      return false;
+    }
+    return await this.helperVersion(binary) === version;
+  }
+
+  // Runs the helper with a question it answers without touching the window: an
+  // answer means it is there and executable, and which build it is.
+  helperVersion(binary) {
+    return exec(binary, ["--version"], { timeout: 5000 })
+      .then(answer => answer.code === 0 ? Number(String(answer.stdout ?? "").trim()) : NaN)
+      .catch(() => NaN);
+  }
+
+  home() {
+    return appHome().replace(/\/+$/, "");
+  }
+
   async hostResize(spec) {
-    const script = `${appHome().replace(/\/+$/, "")}/mods/tabs-git/window.js`;
+    if (this.resizer) {
+      try {
+        const answer = await exec(`${this.home()}/data/tabs-git/winsize`, [JSON.stringify(spec)], { timeout: 2500 });
+        if (answer.code === 0) {
+          const out = JSON.parse(String(answer.stdout ?? "").trim());
+          // Trust and window lookups can fail here where AppleScript still
+          // works; fall back instead of leaving the window alone.
+          if (out?.ok || !["not-trusted", "no-app", "no-window"].includes(out?.reason)) return out;
+        }
+      } catch (_) {}
+      this.resizer = false;
+    }
+    const script = `${this.home()}/mods/tabs-git/window.js`;
     const answer = await exec("/usr/bin/osascript", ["-l", "JavaScript", script, JSON.stringify(spec)], { timeout: 2500 });
     if (answer.code !== 0) return null;
     try { return JSON.parse(String(answer.stdout ?? "").trim()); } catch (_) { return null; }
+  }
+
+  // Closing: the panel must be gone before the window server resizes, or the
+  // frame it keeps showing while the app catches up still holds the panel where
+  // the terminal now is — a sidebar ghost for a few frames. The helper is fast
+  // enough to land both in the same frame, so there the hide goes out at once.
+  // With the AppleScript fallback the resize takes hundreds of milliseconds,
+  // and narrowing while the panel still holds its width is what keeps the
+  // terminal from flashing wide, so there the hide waits for the shrink.
+  closePanel(cx) {
+    this.closing = Date.now();
+    if (this.resizer) {
+      this.setPanelWidth(cx, false);
+      run("layout.hide", { id: "panel" });
+      return;
+    }
+    this.setPanelWidth(cx, false, () => run("layout.hide", { id: "panel" }));
   }
 
   queueResize(cx, job) {
@@ -54,13 +135,13 @@ export default class Tabs extends View {
     cx.spawn(async (cx) => { await task; cx.notify(); });
   }
 
-  // Keep the terminal's columns while the panel is open: widen before showing
-  // it, narrow after hiding it. Restored panels (space switches, restart) go
-  // through here too, so the window width follows the panel every time.
+  // Keep the terminal's columns when the panel opens or closes: widen before
+  // showing it, narrow when it goes (closePanel picks the order). Restored
+  // panels (space switches, restart) go through here too. Only these two
+  // transitions move the window; dragging the divider just resizes the panel.
   setPanelWidth(cx, want, after) {
     const done = () => { if (after) after(); };
     if (want === this.wantGrown) { done(); return; }
-    this.pendingDelta = null;
     if (want) {
       const host = window();
       if (host?.maximized || host?.fullscreen) { done(); return; }
@@ -77,94 +158,76 @@ export default class Tabs extends View {
           // A window already at the width it had with the panel open after a
           // restart is grown, even though this session didn't widen it:
           // closing still narrows it.
-          this.grown = {
-            delta,
-            applied: out.applied > 0 ? out.applied : out.grownBy > 0 ? out.grownBy : delta,
-            to: out.to,
-          };
-          if (out.applied > 0) {
+          let applied = out.applied > 0 ? out.applied : out.grownBy > 0 ? out.grownBy : delta;
+          let to = out.to;
+          // That restored width may be short of what the panel needs now (a
+          // divider dragged under the minimum, a changed panel). The panel is
+          // open, so grow the rest now rather than leaving the terminal squeezed.
+          if (out.noop && applied + 0.5 < delta) {
+            const extra = await this.hostResize({ mode: "grow", delta: delta - applied, base: 0, grown: 0, min: 640 });
+            if (extra?.ok) {
+              applied += extra.applied;
+              to = extra.to;
+            }
+          }
+          this.grown = { delta, applied: applied > 0 ? applied : delta, to };
+          if (!out.noop) {
             this.baseWidth = out.from;
             localStorage.setItem("window.base", String(out.from));
           }
-          this.grownWidth = out.to;
-          localStorage.setItem("window.grown", String(out.to));
+          this.grownWidth = to;
+          localStorage.setItem("window.grown", String(to));
         } finally { done(); }
       });
       return;
     }
-    this.wantGrown = false;
-    const grown = this.grown;
-    this.grown = null;
-    if (!grown) { done(); return; }
+    // `wantGrown` stays true until the shrink finishes: the panel can still be
+    // painted, and syncPanel must not read that leftover as an open panel.
+    if (!this.wantGrown && !this.grown) { done(); return; }
     const host = window();
-    if (host?.maximized || host?.fullscreen) { done(); return; }
+    if (host?.maximized || host?.fullscreen) { this.wantGrown = false; done(); return; }
     this.queueResize(cx, async () => {
       try {
-        // Use the panel's width now, not the one it had when it opened: a
-        // dragged divider must not make the terminal jump on close.
-        const delta = this.windowDelta();
-        const out = await this.hostResize({
+        // Read here, not above: an open still waiting its turn in this queue
+        // sets `grown` first, and that width is what has to be given back.
+        const grown = this.grown;
+        this.grown = null;
+        if (!grown) return;
+        // Undo exactly the width the window gained on open: dragging the
+        // divider while it was open must not change how far it narrows.
+        const delta = grown.applied > 0 ? grown.applied : grown.delta;
+        let out = await this.hostResize({
           mode: "shrink",
-          delta: delta > 0 ? delta : grown.applied,
+          delta,
           expected: grown.to,
           min: 640,
         });
+        // The window was resized by hand while the panel was open, so it is no
+        // longer the width it had when it opened. Give back the panel's current
+        // width instead: closing still narrows the window, and the terminal
+        // keeps the size it has now.
+        if (!out?.ok && out?.reason === "width-changed") {
+          const now = this.windowDelta();
+          if (now > 0) out = await this.hostResize({ mode: "shrink", delta: now, min: 640 });
+        }
         if (out?.ok) {
           this.baseWidth = out.to;
           this.grownWidth = null;
           localStorage.setItem("window.base", String(out.to));
           localStorage.removeItem("window.grown");
         }
-      } finally { done(); }
-    });
-  }
-
-  // Dragging the panel's divider changes the layout, not the window; after the
-  // drag settles, move the window by the same amount so the terminal keeps its
-  // columns. Debounced: a drag re-renders on every pixel.
-  followPanelWidth(cx) {
-    if (!this.wantGrown || !this.grown || this.panelSync || this.liveBusy) return;
-    const delta = this.windowDelta();
-    if (Math.abs(delta - this.grown.delta) < 0.5) return;
-    this.pendingDelta = delta;
-    this.panelSync = true;
-    cx.spawn(async (cx) => {
-      await cx.sleep(180);
-      this.panelSync = false;
-      if (!this.wantGrown || !this.grown || this.liveBusy) return;
-      const want = this.pendingDelta;
-      if (want == null) return;
-      const diff = Math.round((want - this.grown.delta) * 10) / 10;
-      if (Math.abs(diff) < 0.5) return;
-      this.liveBusy = true;
-      this.queueResize(cx, async () => {
-        const grown = this.grown;
-        if (!grown) { this.liveBusy = false; return; }
-        try {
-          const out = diff > 0
-            ? await this.hostResize({ mode: "grow", delta: diff, base: 0, grown: 0, min: 640 })
-            : await this.hostResize({ mode: "shrink", delta: -diff, expected: grown.to, min: 640 });
-          // The panel may be gone by the time the OS answers.
-          if (!this.grown) return;
-          // Remember the new divider position either way; retrying a refused
-          // resize (a manually changed window) every render would spin.
-          this.grown.delta = want;
-          if (!out?.ok) return;
-          this.grown.applied = this.baseWidth != null
-            ? Math.max(0, out.to - this.baseWidth)
-            : grown.applied + diff;
-          this.grown.to = out.to;
-          this.grownWidth = out.to;
-          localStorage.setItem("window.grown", String(out.to));
-        } finally {
-          this.liveBusy = false;
-        }
-      });
+      } finally {
+        // The hide (the callback) goes before `wantGrown` is cleared: a render
+        // in between would read the still-visible panel as an open one.
+        done();
+        this.wantGrown = false;
+      }
     });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
   // (closed if it never had one), and opening or closing it records it.
+  // Dragging its divider resizes the panel only, never the window.
   syncPanel(space, panel, body, enabled, cx) {
     if (!space || !panel) return;
     const now = panel.hidden ? null : body?.active ?? null;
@@ -180,8 +243,7 @@ export default class Tabs extends View {
             run("layout.show", { id: "panel" });
             this.setPanelWidth(cx, true);
           } else {
-            run("layout.hide", { id: "panel" });
-            this.setPanelWidth(cx, false);
+            this.closePanel(cx);
           }
           return;
         }
@@ -192,11 +254,17 @@ export default class Tabs extends View {
       if (this.pending.want !== now && Date.now() < this.pending.until) return;
       this.pending = null;
     }
+    // A panel on its way out is still painted for a frame or two: that leftover
+    // is not a choice, and the window must not grow back to it. Once the hide
+    // lands (or a failed one gives up) the normal rules apply again.
+    if (this.closing) {
+      if (now && Date.now() - this.closing < 3000) return;
+      this.closing = null;
+    }
     // A visible panel always owns the extra window width, including one the
     // app restored before this mod widened anything.
     if (now) {
       this.setPanelWidth(cx, true);
-      this.followPanelWidth(cx);
     }
     if (this.panels[space.id] === now) return;
     this.panels[space.id] = now;
@@ -261,8 +329,7 @@ export default class Tabs extends View {
         .on_click((_e, cx) => {
           if (on) {
             this.clickedPanel = null;
-            run("layout.hide", { id: "panel" });
-            this.setPanelWidth(cx, false);
+            this.closePanel(cx);
           } else if (panel && !panel.hidden) {
             run("layout.select", { stack: "panel-body", child: id });
           } else {
