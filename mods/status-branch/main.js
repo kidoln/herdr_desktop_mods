@@ -34,6 +34,9 @@ const CLAUDE_APP = "claude-code"; // the `app` its status report carries
 const PROMPT_MAX = 400; // characters kept for the bar and the marquee
 const MARQUEE_GAP = 48; // px of blank between the two copies of the text
 const MARQUEE_SPEED = 60; // window px per second, a calm right-to-left crawl
+const MARQUEE_DELAY = 350; // ms the pointer must rest on the line before it crawls
+const MARQUEE_EDGE = 0.25; // the bar's bottom quarter: the way out of the window
+const MARQUEE_DROP = 0.18; // a downward move this share of the bar reads as heading out
 const MESSAGE_MENU_W = 460; // px: wide enough to read, narrow enough not to span the screen
 const MESSAGE_MENU_MAX_H = 420;
 const CLAUDE_PID_TTL = 5000; // ms a terminal's Claude pid is trusted
@@ -288,6 +291,9 @@ export default class StatusBranch extends View {
     this.marqueePolicy = null;
     this.marqueeTasks = [];
     this.marqueePass = 0; // a fresh track per pass: no stale transition state
+    this.marqueeWait = null; // the pending wait, for a pointer just crossing the bar
+    this.hoverRested = false; // the pointer has stayed the delay long
+    this.pointerY = null; // the last pointer height in the line, for its edge test
 
     cx.timer.every(1500, (cx) => this.refreshPrompt(cx));
     this.refreshPrompt(cx);
@@ -1012,7 +1018,18 @@ export default class StatusBranch extends View {
     );
   }
 
+  // Ends the hover: the ordinary exit, and the bottom edge of the window,
+  // which reports no exit at all (see promptView).
+  stopHover(cx) {
+    if (!this.hoverPrompt) return;
+    this.hoverPrompt = false;
+    this.hoverRested = false;
+    this.clearMarquee();
+    this.paint(cx);
+  }
+
   clearMarquee() {
+    this.cancelMarqueeWait();
     for (const t of this.marqueeTasks) {
       try {
         t?.cancel();
@@ -1021,6 +1038,39 @@ export default class StatusBranch extends View {
     this.marqueeTasks = [];
     this.promptAnim = false;
     this.promptOffset = 0;
+  }
+
+  // A pointer only crossing the bar must not set the line crawling: the slide
+  // waits until the pointer has rested on it for MARQUEE_DELAY, and leaving
+  // before then cancels it. Movement is still the trigger (see promptView), so
+  // a line appearing under a resting pointer does not start on its own.
+  scheduleMarquee(cx) {
+    this.cancelMarqueeWait();
+    this.hoverRested = false;
+    if (!this.hoverPrompt) return;
+    this.marqueeWait = cx.timer.after(MARQUEE_DELAY, (cx) => {
+      this.marqueeWait = null;
+      if (!this.hoverPrompt) return;
+      this.hoverRested = true;
+      if (!this.marqueeActive()) return;
+      this.startMarquee(cx);
+    });
+  }
+
+  cancelMarqueeWait() {
+    try {
+      this.marqueeWait?.cancel();
+    } catch {}
+    this.marqueeWait = null;
+  }
+
+  // A size measured while the pointer is on the line resumes the slide: at
+  // once when the pointer has already rested, otherwise after a fresh wait
+  // (a text change cancels a pending one, and must not bypass the delay).
+  resumeMarquee(cx) {
+    if (!this.hoverPrompt) return;
+    if (this.hoverRested) this.startMarquee(cx);
+    else this.scheduleMarquee(cx);
   }
 
   // One pass moves a copied track left by one copy plus the gap. The track is
@@ -1246,7 +1296,7 @@ export default class StatusBranch extends View {
             if (Math.abs(size.width - this.promptUnit) > 0.5) {
               this.promptUnit = size.width;
               this.paint(cx);
-              if (this.hoverPrompt) this.startMarquee(cx);
+              this.resumeMarquee(cx);
             }
           });
     // The popover's trigger is just the icon: a Popover is not a normal flex
@@ -1277,18 +1327,36 @@ export default class StatusBranch extends View {
         // Starting on hover entry is wrong: a line that appears under a pointer
         // resting at the bar is reported as hovered without the pointer ever
         // moving here, and the crawl then runs on its own. Movement on the line
-        // is the only sure sign the pointer is really on it. Leaving is still
-        // the ordinary exit event.
-        .on_mouse_move((_event, cx) => {
+        // is the only sure sign the pointer is really on it. Even then the
+        // crawl waits MARQUEE_DELAY, so a pointer merely crossing the bar does
+        // not set it off.
+        //
+        // The bar ends at the window's bottom edge, and a pointer leaving
+        // through that edge gets no exit event at all: the crawl would run on
+        // with the pointer outside. So the bar's bottom strip, and a move
+        // dropping quickly toward it, end the hover here.
+        .on_mouse_move((event, cx) => {
+          const y = event.local_position?.y ?? 0;
+          const dy = y - (this.pointerY ?? y);
+          this.pointerY = y;
+          const h = event.bounds?.height ?? 0;
+          const edge = h > 0 && y > h * (1 - MARQUEE_EDGE);
+          const dropping =
+            this.hoverPrompt &&
+            h > 0 &&
+            y > h / 2 &&
+            dy >= Math.max(6, h * MARQUEE_DROP);
+          if (edge || dropping) {
+            this.stopHover(cx);
+            return;
+          }
           if (this.hoverPrompt) return;
           this.hoverPrompt = true;
-          this.startMarquee(cx);
+          this.scheduleMarquee(cx);
         })
         .on_hover((hovered, cx) => {
-          if (hovered || !this.hoverPrompt) return;
-          this.hoverPrompt = false;
-          this.clearMarquee();
-          this.paint(cx);
+          if (hovered) return;
+          this.stopHover(cx);
         })
         .child(surface)
         .child(
@@ -1303,7 +1371,7 @@ export default class StatusBranch extends View {
               if (Math.abs(size.width - this.promptBox) > 0.5) {
                 this.promptBox = size.width;
                 this.paint(cx);
-                if (this.hoverPrompt) this.startMarquee(cx);
+                this.resumeMarquee(cx);
               }
             })
             .child(inner)
