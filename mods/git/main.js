@@ -1236,7 +1236,7 @@ export default class Git extends View {
       .on_click((_e, cx) => this.pick(f, staged, cx))
       .child(div().w(14).flex_none().text_center().text_size(11).font_semibold().text_color(color).child(letter))
       .child(h_flex().flex_1().min_w(0).gap(6)
-        .child(div().truncate().flex_shrink_0().child(name))
+        .child(div().min_w(0).truncate().child(name))
         .when(Boolean(dir), (e) => e.child(div().min_w(0).truncate().text_color(t.dim).flex_shrink(8).child(dir))))
       .when(f.add > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${f.add}`)))
       .when(f.del > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`\u2212${f.del}`)))
