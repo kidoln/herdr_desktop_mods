@@ -6,7 +6,9 @@
 // message sent to the shown tab's agent (or the focused terminal's, when that is
 // one; never another tab's). opencode's prompts come from its own SQLite;
 // Claude Code's come from its own state files (a tail of history.jsonl, keyed by
-// the session Herdr's foreground pid names), so neither needs a hook. Hovering
+// the session Herdr's foreground pid names); Codex's come from its state
+// database and history.jsonl (the folder's newest thread), so none needs a
+// hook. Hovering
 // that message crawls it right to left when it does not fit; pressing it opens
 // the session's user messages above the bar, numbered in the order they were
 // sent.
@@ -31,6 +33,7 @@ import {
 const OPENCODE = "opencode";
 const CLAUDE = "claude"; // Claude Code's program-table key
 const CLAUDE_APP = "claude-code"; // the `app` its status report carries
+const CODEX = "codex"; // Codex's program-table key and the `app` it reports
 const PROMPT_MAX = 400; // characters kept for the bar and the marquee
 const MARQUEE_GAP = 48; // px of blank between the two copies of the text
 const MARQUEE_SPEED = 60; // window px per second, a calm right-to-left crawl
@@ -44,6 +47,13 @@ const CLAUDE_HISTORY_BYTES = 262144; // history.jsonl tail read on every tick
 const CLAUDE_HISTORY_MENU = 2097152; // history.jsonl read when the menu opens
 const CLAUDE_MENU_MAX = 400; // messages kept in the session menu
 const CLAUDE_MISS_MS = 5000; // ms before a transcript is retried after no history
+const CODEX_HISTORY_BYTES = 262144; // history.jsonl tail read on every tick
+const CODEX_HISTORY_MENU = 2097152; // history.jsonl read when the menu opens
+const CODEX_MENU_MAX = 400; // messages kept in the session menu
+const CODEX_MISS_MS = 5000; // ms before a rollout is retried after no history
+const CODEX_DB_TTL = 30000; // ms Codex's state database path is trusted
+const CODEX_PROMPT_LINES = 40; // rollout lines scanned for the newest prompt
+const CODEX_MENU_LINES = 1200; // rollout lines scanned when the menu opens
 
 // The live folder of an agent, even when it has no pane of its own (a sub-agent).
 function agentCwd(a) {
@@ -89,10 +99,15 @@ function isClaude(a) {
   );
 }
 
+function isCodex(a) {
+  return a?.app === CODEX || a?.program?.key === CODEX;
+}
+
 // Which agent's prompt line the bar can show, or null for anyone else.
 function agentKind(a) {
   if (isOpencode(a)) return "opencode";
   if (isClaude(a)) return "claude";
+  if (isCodex(a)) return "codex";
   return null;
 }
 
@@ -177,6 +192,69 @@ function claudeTranscriptText(o) {
   return text || `[${files} ${files === 1 ? "file" : "files"}]`;
 }
 
+// A line of Codex's own input history (`history.jsonl`): the text the person
+// submitted, with the session it belongs to (`session_id`) and a seconds
+// timestamp (`ts`). It is written as the prompt is submitted, so it is the
+// bar's every-tick source; the rollout below backs it up.
+function codexHistoryText(row) {
+  return typeof row?.text === "string" ? row.text.trim() : "";
+}
+
+// The send time of a Codex history row: seconds, unlike a transcript's ms.
+function codexHistoryAt(row) {
+  const n = Number(row?.ts);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
+// A person's message from a Codex rollout (`sessions/<date>/rollout-*.jsonl`).
+// Three shapes exist across versions: the current `event_msg` /
+// `item_completed` `UserMessage` item, the older `event_msg` / `user_message`,
+// and `response_item` / `message` / `role: "user"`. The bundled instructions
+// and environment context arrive as user messages too; the item shapes mark
+// people exactly, and the response shape is filtered by what it starts with.
+function codexRolloutText(o) {
+  const p = o?.payload;
+  if (!p) return "";
+  if (o.type === "event_msg" && p.type === "item_completed") {
+    const item = p.item;
+    if (item?.type !== "UserMessage") return "";
+    const c = item.content;
+    if (!Array.isArray(c)) return "";
+    return c
+      .filter((b) => b && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+  }
+  if (o.type === "event_msg" && p.type === "user_message")
+    return typeof p.message === "string" ? p.message.trim() : "";
+  if (o.type !== "response_item" || p.type !== "message" || p.role !== "user")
+    return "";
+  const kinds = p.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  if (Array.isArray(kinds) && !kinds.includes("user.text")) return "";
+  const c = p.content;
+  let text = "";
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c))
+    text = c
+      .filter(
+        (b) =>
+          b &&
+          (b.type === "input_text" || b.type === "text") &&
+          typeof b.text === "string",
+      )
+      .map((b) => b.text)
+      .join("\n");
+  text = text.trim();
+  if (!text) return "";
+  // Injected context in an older rollout that carries no `kinds` at all.
+  if (/^<(?:environment_context|user_instructions|INSTRUCTIONS)/.test(text))
+    return "";
+  if (/^# AGENTS\.md instructions/.test(text)) return "";
+  return text;
+}
+
 // A message's send time, to the second.
 function sentAt(ms) {
   const n = Number(ms);
@@ -250,11 +328,11 @@ export default class StatusBranch extends View {
     this.open = false; // the branch list
     this.branches = null; // null until the first read
 
-    // The last prompt of the agent the main pane is about: opencode's SQLite
-    // or Claude Code's own files, whichever the agent is.
+    // The last prompt of the agent the main pane is about: opencode's SQLite,
+    // Claude Code's state files, or Codex's, whichever the agent is.
     this.prompt = ""; // the one-line text shown (and scrolled on hover)
     this.promptFull = ""; // the raw text, for comparing refreshes
-    this.promptKind = null; // "opencode" | "claude", the owner of the line
+    this.promptKind = null; // "opencode" | "claude" | "codex", owner of the line
     this.promptSummary = ""; // the session's name, for the menu's header
     this.promptAgent = null;
     this.promptTerm = null; // the focused terminal the line belongs to
@@ -270,6 +348,12 @@ export default class StatusBranch extends View {
     this.claudeSessions = new Map();
     this.transcripts = new Map();
     this.claudeMiss = new Map();
+
+    // Codex's own state: its folder, the session index's current database
+    // file, and the last time a rollout backed an empty history.
+    this.codexHomes = new Map();
+    this.codexDbs = new Map();
+    this.codexMiss = new Map();
 
     // The prompt's message menu: every user message of the session, oldest
     // first, read fresh when the line is pressed.
@@ -420,6 +504,221 @@ export default class StatusBranch extends View {
       machine,
       this.claudeHomes,
     );
+  }
+
+  // Codex's state folder (`~/.codex`, or wherever CODEX_HOME points).
+  async codexHomeFor(machine) {
+    return this.homeFor("CODEX_HOME:-$HOME/.codex", machine, this.codexHomes);
+  }
+
+  // Codex's session index: `state_<n>.sqlite`, whose number changes with a
+  // release. Ask the folder which one was written last, and trust it briefly.
+  async codexDbFor(base, machine) {
+    const key = `${machine ?? ""}\u0000${base}`;
+    const seen = this.codexDbs.get(key);
+    if (seen && Date.now() - seen.at < CODEX_DB_TTL) return seen.path;
+    const r = await exec(
+      "sh",
+      ["-c", 'ls -1t "$0"/state_*.sqlite 2>/dev/null | head -n 1', base],
+      machine ? { on: machine } : {},
+    ).catch(() => null);
+    const found = r?.code === 0 ? r.stdout.trim() : "";
+    const path = found || `${base}/state_5.sqlite`;
+    this.codexDbs.set(key, { at: Date.now(), path });
+    return path;
+  }
+
+  // The Codex session behind this terminal: the folder's most recently
+  // updated thread, archived ones aside. Codex keeps no per-process session
+  // file and its terminal title is only the folder, so this is the mapping
+  // there is; two TUIs in one folder share it, and a newer thread from another
+  // client in the same folder wins. `name` is a person-given thread name.
+  async codexThread({ cwd, machine }) {
+    if (!cwd) return null;
+    const base = await this.codexHomeFor(machine);
+    if (!base) return null;
+    const db = await this.codexDbFor(base, machine);
+    const esc = (s) => String(s).replaceAll("'", "''");
+    const run = async (sql) => {
+      const r = await exec(
+        "sqlite3",
+        ["-readonly", "-json", db, sql],
+        machine ? { on: machine } : {},
+      ).catch(() => null);
+      if (!r || r.code !== 0) return null;
+      try {
+        const rows = JSON.parse(r.stdout.trim() || "[]");
+        return rows[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const where = `cwd='${esc(cwd)}' and coalesce(archived,0)=0`;
+    let row = await run(
+      `select id, name, title, rollout_path from threads where ${where}` +
+        ` order by coalesce(updated_at_ms, updated_at*1000) desc limit 1;`,
+    );
+    // An older database has no millisecond columns; the row is still there.
+    if (!row)
+      row = await run(
+        `select id, rollout_path from threads where ${where}` +
+          ` order by updated_at desc limit 1;`,
+      );
+    if (!row?.id) return null;
+    return {
+      id: String(row.id),
+      name: typeof row.name === "string" ? row.name.trim() : "",
+      title: typeof row.title === "string" ? row.title.trim() : "",
+      path: typeof row.rollout_path === "string" ? row.rollout_path : "",
+      base,
+    };
+  }
+
+  // The menu's header: the thread's own name, else the message it opened with,
+  // else the folder it works in.
+  codexSummary(th, cwd) {
+    if (th?.name) return oneLine(th.name);
+    if (th?.title) return oneLine(th.title);
+    const folder = String(cwd ?? "").replace(/[\\/]+$/, "");
+    return folder.split(/[\\/]/).pop() || "Codex";
+  }
+
+  // The tail of Codex's input history: one JSON line per submitted prompt,
+  // from every session on that machine, oldest first. A tail keeps it cheap
+  // however long the file gets.
+  async readCodexHistory({ base, machine, bytes }) {
+    const r = await exec(
+      "tail",
+      ["-c", String(bytes), `${base}/history.jsonl`],
+      machine ? { on: machine } : {},
+    ).catch(() => null);
+    if (!r || r.code !== 0) return { ok: false, rows: [] };
+    const rows = [];
+    for (const line of r.stdout.split("\n")) {
+      const s = line.trim();
+      if (!s.startsWith("{")) continue; // a tail can cut the first line
+      try {
+        rows.push(JSON.parse(s));
+      } catch {}
+    }
+    return { ok: true, rows };
+  }
+
+  // A rollout's person messages, oldest first. `want: "prompt"` scans only the
+  // last few hits so the rare fallback stays cheap; the menu takes more. The
+  // rollout's user-message lines are grepped, so tool output never reaches the
+  // parser.
+  async readCodexRollout({ path, machine, want }) {
+    if (!path) return null;
+    const lines = want === "prompt" ? CODEX_PROMPT_LINES : CODEX_MENU_LINES;
+    const script =
+      `grep -aE '"role":"user"|"type":"user_message"|"type":"UserMessage"' "$0"` +
+      ` | tail -n ${lines} || true`;
+    const r = await exec(
+      "sh",
+      ["-c", script, path],
+      machine ? { on: machine } : {},
+    ).catch(() => null);
+    if (!r) return null;
+    const item = [];
+    const older = [];
+    const response = [];
+    for (const line of String(r.stdout).split("\n")) {
+      const s = line.trim();
+      if (!s.startsWith("{")) continue;
+      let o;
+      try {
+        o = JSON.parse(s);
+      } catch {
+        continue;
+      }
+      const text = codexRolloutText(o);
+      if (!text) continue;
+      const at = Date.parse(o.timestamp ?? "") || 0;
+      const p = o.payload;
+      if (o.type === "event_msg" && p?.type === "item_completed")
+        item.push({ text, at });
+      else if (o.type === "event_msg" && p?.type === "user_message")
+        older.push({ text, at });
+      else response.push({ text, at });
+    }
+    // One rollout may mix shapes (a codex upgrade mid-session); the newest
+    // shape present is the one that marks people exactly, so it wins.
+    return item.length ? item : older.length ? older : response;
+  }
+
+  // The newest prompt of one Codex session: the input history is written as it
+  // is submitted; the rollout backs it up when the history has no row for it.
+  async readCodexPrompt({ cwd, machine }) {
+    const th = await this.codexThread({ cwd, machine });
+    if (!th) return { ok: false, text: "" };
+    const summary = this.codexSummary(th, cwd);
+    const h = await this.readCodexHistory({
+      base: th.base,
+      machine,
+      bytes: CODEX_HISTORY_BYTES,
+    });
+    if (h.ok) {
+      for (let i = h.rows.length - 1; i >= 0; i--) {
+        const row = h.rows[i];
+        if (row?.session_id !== th.id) continue;
+        const text = codexHistoryText(row);
+        if (text) return { ok: true, text, summary };
+      }
+      // No prompt in the tail: usually a fresh session, but a tail can also
+      // cut a long session's only prompt. The rollout is asked, and what it
+      // found is kept for a moment so the line does not blink.
+      const key = `${machine ?? ""}\u0000${th.id}`;
+      const seen = this.codexMiss.get(key);
+      if (seen && Date.now() - seen.at < CODEX_MISS_MS)
+        return { ok: true, text: seen.text, summary };
+    }
+    const rows = await this.readCodexRollout({
+      path: th.path,
+      machine,
+      want: "prompt",
+    });
+    if (rows) {
+      const text = rows[rows.length - 1]?.text ?? "";
+      if (h.ok)
+        this.codexMiss.set(`${machine ?? ""}\u0000${th.id}`, {
+          at: Date.now(),
+          text,
+        });
+      return { ok: true, text, summary };
+    }
+    // With a working history an empty answer means an empty session; without
+    // one, a failed read is no reason to drop the line already shown.
+    return { ok: h.ok, text: "", summary };
+  }
+
+  // Every person message of the Codex session, oldest first. The input history
+  // covers TUI prompts; the rollout is the whole conversation and backs it up.
+  async readCodexMessages({ cwd, machine }) {
+    const th = await this.codexThread({ cwd, machine });
+    if (!th) return { ok: false, messages: [] };
+    const h = await this.readCodexHistory({
+      base: th.base,
+      machine,
+      bytes: CODEX_HISTORY_MENU,
+    });
+    const messages = [];
+    if (h.ok) {
+      for (const row of h.rows) {
+        if (row?.session_id !== th.id) continue;
+        const text = codexHistoryText(row);
+        if (text) messages.push({ text, at: codexHistoryAt(row) });
+      }
+    }
+    if (messages.length)
+      return { ok: true, messages: messages.slice(-CODEX_MENU_MAX) };
+    const rows = await this.readCodexRollout({
+      path: th.path,
+      machine,
+      want: "messages",
+    });
+    if (rows) return { ok: true, messages: rows.slice(-CODEX_MENU_MAX) };
+    return h.ok ? { ok: true, messages } : { ok: false, messages: [] };
   }
 
   // The newest user message in the opencode session behind this terminal.
@@ -899,7 +1198,9 @@ export default class StatusBranch extends View {
                 cwd,
                 machine,
               })
-            : await this.readOpencodeMessages({ cwd, title, machine });
+            : kind === "codex"
+              ? await this.readCodexMessages({ cwd, machine })
+              : await this.readOpencodeMessages({ cwd, title, machine });
       } catch {}
       if (gen !== this.promptMsgGen) return;
       this.promptMsgError = !res.ok;
@@ -978,7 +1279,9 @@ export default class StatusBranch extends View {
         res =
           kind === "claude"
             ? await this.readClaudePrompt({ address: a.address, cwd, machine })
-            : await this.readOpencodePrompt({ cwd, title, machine });
+            : kind === "codex"
+              ? await this.readCodexPrompt({ cwd, machine })
+              : await this.readOpencodePrompt({ cwd, title, machine });
       } catch {}
       this.promptBusy = false;
       if (gen !== this.promptGen) return;
@@ -990,7 +1293,7 @@ export default class StatusBranch extends View {
       const text = res.text;
       const one = oneLine(text);
       const summary =
-        kind === "claude" ? (res.summary ?? "") : sessionSummary(a);
+        kind === "opencode" ? sessionSummary(a) : (res.summary ?? "");
       if (summary) this.promptSummary = summary;
       if (one === this.prompt && text === this.promptFull) return;
       // A line that is going away cannot stay hovered.
