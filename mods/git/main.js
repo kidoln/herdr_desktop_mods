@@ -646,6 +646,11 @@ export default class Git extends View {
         // A picked branch that is gone would leave the filter showing nothing;
         // drop it instead.
         for (const name of [...this.picked]) if (!remotes.has(name) && !localRefs.includes(name)) this.picked.delete(name);
+        // The graph is built here, off the render path: this is where the
+        // commits and the picker both settle, so the next redraw only reads it.
+        // A graph that cannot be built leaves the cache empty rather than
+        // costing the file list below; the render's own fallback reports it.
+        try { this.buildGraph(); } catch { this._graph = null; }
         this.syncCommitView();
         this.files = parsed; this.limited = entries.length > 2000;
         this.staged = parsed.filter((f) => f.staged).map((f) => ({ ...f, ...(stagedStats[f.path] ?? {}) }));
@@ -1132,7 +1137,7 @@ export default class Git extends View {
         .when(on, (e) => e.bg(t.selected))
         .when(!on, (e) => e.hover((s) => s.bg(t.hover)))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); this._graph = null; this.syncCommitView(); cx.notify(); })
+        .on_click((_e, cx) => { if (picked.has(name)) picked.delete(name); else picked.add(name); this.buildGraph(); this.syncCommitView(); cx.notify(); })
         .child(div().size(9).flex_none().rounded(5).bg(t[this.lampOf(name)]))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(on ? t.foreground : t.muted).child(name))
         .when(name === this.branch, (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child("current")))
@@ -1147,7 +1152,7 @@ export default class Git extends View {
       .child(h_flex().id("git-bp-all").h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
         .when(picked.size === 0, (e) => e.bg(t.selected))
         .when(picked.size > 0, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => { picked.clear(); this._graph = null; this.syncCommitView(); cx.notify(); })
+        .on_click((_e, cx) => { picked.clear(); this.buildGraph(); this.syncCommitView(); cx.notify(); })
         .child(icon("git").size(11).text_color(t.muted))
         .child(div().flex_1().text_size(12).text_color(picked.size ? t.muted : t.foreground).child("All branches"))
         .when(picked.size === 0, (e) => e.child(icon("check").size(12).text_color(t.accent))))
@@ -1344,19 +1349,33 @@ export default class Git extends View {
   }
 
   // The graph for the shown list, cached until the commits or the picker
-  // changes. Each row keeps the dot's lane x, its lamp, and the line pieces.
-  graph(commits) {
-    const picked = [...this.picked].sort().join("\n");
+  // changes. It is built off the render path -- a read that lands, or a branch
+  // pick, builds it once (see buildGraph) -- so a redraw only reads the cache
+  // and never carries the walk; a first paint that beats every read still gets
+  // one here. Each row keeps the dot's lane x, its lamp, and the line pieces.
+  graph() {
     const hit = this._graph;
-    if (hit && hit.src === this.commits && hit.picked === picked) return hit;
+    if (hit && hit.src === this.commits && hit.picked === this.pickedKey()) return hit;
+    return this.buildGraph();
+  }
+
+  // The picker's state as the cache key: the same picks in any click order are
+  // the same graph.
+  pickedKey() {
+    return [...this.picked].sort().join("\n");
+  }
+
+  // Walk the shown commits once and cache the rows. Called where the data lands
+  // and where the picker changes, so a render never pays for the walk.
+  buildGraph() {
     // A commit's line is colored by the branch tip on it: the current branch
     // first, then any branch the picker has on (nothing picked: all of them).
     const tipName = (c) => {
       const names = (c.tips ?? []).filter((n) => !this.picked.size || this.picked.has(n));
       return names.find((n) => n === this.branch) ?? names[0] ?? null;
     };
-    const { rows, lanes, widest, colors } = graphRows(commits, tipName, (n) => this.lampOf(n));
-    this._graph = { src: this.commits, picked,
+    const { rows, lanes, widest, colors } = graphRows(this.shownCommits(), tipName, (n) => this.lampOf(n));
+    this._graph = { src: this.commits, picked: this.pickedKey(),
       rows: rows.map((items, i) => ({
         x: GRAPH.x0 + lanes[i] * GRAPH.pitch,
         // Just this row's lanes, with x0 of room on either side of the dot.
@@ -1512,7 +1531,7 @@ export default class Git extends View {
   // "<shown>/<all>" while a branch filter is on.
   historySection(t) {
     const commits = this.shownCommits();
-    const graph = this.graph(commits);
+    const graph = this.graph();
     const filtered = this.picked.size > 0;
     const compact = this.historyMode === "compact";
     const closed = this.historyMode === "collapsed";
