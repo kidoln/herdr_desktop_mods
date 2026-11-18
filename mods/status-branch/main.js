@@ -11,7 +11,7 @@
 // hook. Hovering
 // that message crawls it right to left when it does not fit; pressing it opens
 // the session's user messages above the bar, numbered in the order they were
-// sent.
+// sent, and pressing one of those copies it to the clipboard.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, Popover } from "gpui-base";
 import {
@@ -1482,6 +1482,19 @@ export default class StatusBranch extends View {
       );
   }
 
+  // A message pressed in the menu goes to the clipboard whole (the row may wrap
+  // or the bar may show only its head), with a toast naming what was copied.
+  copyMessage(text, cx) {
+    const body = String(text ?? "");
+    if (!body) return;
+    cx.write_to_clipboard(body);
+    notify({
+      title: "Copied to clipboard",
+      body: body.replace(/\s+/g, " ").trim().slice(0, 80) || "Message",
+      timeout: 1400,
+    });
+  }
+
   // The menu above the bar: every user message of this session, oldest first
   // and numbered from one. It scrolls once it would cover too much of the
   // window; the width is fixed so long prompts wrap instead of stretching.
@@ -1546,7 +1559,11 @@ export default class StatusBranch extends View {
             .py(6)
             .gap(8)
             .items_start()
+            .cursor_pointer()
+            .tooltip("Click to copy")
+            .hover((s) => s.bg(t.hover))
             .when(i < count - 1, (el) => el.border_b(1).border_color(t.border))
+            .on_click((_e, cx) => this.copyMessage(msg.text, cx))
             .child(
               div()
                 .flex_none()
