@@ -68,6 +68,8 @@
 - 宽面板并排显示（左旧右新，被替换的删除行与新增行同行对齐）；面板窄于阈值时折叠成单栏统一视图，行不会被挤扁。
 - 新文件（整列绿色）或删除文件（整列红色）始终单栏；hunk 头与文件元信息整行显示。
 - 头部 `Edit` 按钮就地切换为编辑器：保存前校验文件自读取后未被改动（否则拒绝），带未保存修改离开会先询问一次。提交的 diff 也能进入编辑——编辑的是工作区副本，diff 仍显示提交版本。
+- 编辑器打开在 diff 正在看的位置：点过 diff 的某一行就以那一行为光标（该行带淡强调底色），没点过就取视口最上面一行；两者都换算成工作区文件的行号（删除行取新文件里对应的位置）。打开后这一行落在面板正中，光标停在行首；从编辑器返回 diff 时也回到离开时的那一行。
+- 光标所在行在文字下方有一条色带，光标移动时跟随。
 - 单次对比有上限（600 KB patch / 4000 行）；二进制文件与远程机器上的文件不可编辑。
 
 #### `file-view` — 文件编辑 / 图片查看标签页
@@ -225,6 +227,8 @@ The window looks like this:
 - Wide panes show it side by side (old left, new right; a removed line and the added line that replaces it share a row); a narrow pane folds the same rows into one unified column, so lines are never squeezed.
 - A new file (all green) or a deleted one (all red) is always a single full-width column; hunk headers and file metadata span the row.
 - The header's `Edit` button turns the pane into an editor for the file on disk: `Save` is refused when the file changed since it was read, and leaving with unsaved changes asks once. A commit's diff can be edited too — the editor holds the working-tree copy while the diff keeps showing the commit's version.
+- The editor opens where the diff was looking: a row clicked in the diff is the cursor (it carries a faint accent), and without one the top row on screen is used; both become a line of the working-tree file (a removal takes the line the new file puts in its place). That line lands in the middle of the pane with the caret on it, and going back to the diff returns to the row it was left at.
+- The caret's line carries a band behind the text, which follows the caret as it moves.
 - Bounds: 600 KB patch / 4000 lines per comparison; binary files and files on another machine cannot be edited.
 
 #### `file-view` — the file editing / image viewing tab

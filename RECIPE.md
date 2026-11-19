@@ -147,9 +147,15 @@ Editing and saving:
   the save.
 - `git-diff`'s `Edit` button turns the pane into the same editor for the
   file on disk (a commit's diff included — the editor holds the working-tree
-  copy while the diff keeps showing the commit). Leaving with unsaved
-  changes takes a second press ("Discard changes?"). After a save it
-  refetches the diff.
+  copy while the diff keeps showing the commit). It opens where the diff was
+  looking: the row clicked last in the diff — kept as a line and washed with a
+  faint accent, a cursor of sorts — or, with none, the first row on screen; both
+  become a line of the working-tree file, a removal taking the line the new file
+  puts where it was. That line is put in the middle of the pane with the caret
+  on it, and going back to the diff scrolls it to the row it was left at. The
+  caret's line carries a band behind the text, which follows the caret as it
+  moves. Leaving with unsaved changes takes a second press ("Discard
+  changes?"). After a save it refetches the diff.
 - Files panel menu: open with the default app (`open` on macOS, `xdg-open`
   on Linux, `powershell` on Windows), open in pane, rename, cut / copy /
   paste, copy path, delete (with a confirmation listing the names); a folder
@@ -334,7 +340,21 @@ The new mods:
   labels in narrow panes. Untracked files are read whole and shown all-green
   (`readTextFile`, 400 KB / 4,000 lines cap); new/deleted files stay in one
   column whatever the width. The editor holds the working-tree file with the
-  same save-refusal contract as `file-view`.
+  same save-refusal contract as `file-view`. It keeps the pane's place in a
+  `VirtualListScrollHandle` (`track_scroll`, `scroll_to_item(i, "top")`) and
+  learns the first row on screen from the `v_virtual_list` renderer's range
+  (`on_item_click` names a clicked row; rows carry the working-tree `line`
+  `buildRows` assigns them). The edit jump is `EditorState.set_selected_range`
+  + `focus`: two steps put the line whose row ends at the bottom edge of the
+  wanted scroll into the caret (the editor scrolls a caret that is out of sight
+  to the nearest edge, so that scroll is the wanted one), then the target line —
+  on screen by then, so the view stays put. The step runs 80 ms apart, and the
+  band's offset mirrors the same rule from a 160 ms poll of
+  `selected_range().start`: a caret out of sight moves the band's scroll to the
+  nearest edge, which is all the editor does. The band is a sibling drawn under
+  the editor (`the editor's .bg("#00000000")` lets it through), one line tall
+  (`17.5` design px at font size 11), placed from the caret's line and the
+  mirrored scroll.
 - `file-view` (≈200 lines): reads `shared("files.view")`; the editor's
   language comes from the extension (ts/tsx→js, toml→yaml, …); read-only
   for remote or >1 MiB files; `close()` releases the editor.
@@ -431,10 +451,11 @@ sets no fonts either.
    highlights, clicking the same file again closes the pane; shrinking the
    pane under 420 design px folds it to one column; a new file shows one
    green column.
-4. Editing: `Edit` in the diff turns it into an editor; a save with the file
-   changed underneath is refused with an explanation; the Files panel's
-   `file-view` pane does the same; rename from the Files menu repoints the
-   open editor, delete clears it.
+4. Editing: `Edit` in the diff turns it into an editor, opening on the
+   diff's row in the middle of the pane with a band on the caret's line that
+   follows the caret; a save with the file changed underneath is refused with
+   an explanation; the Files panel's `file-view` pane does the same; rename
+   from the Files menu repoints the open editor, delete clears it.
 5. Commit flow: `Commit` with nothing staged stages everything; `Pull &
    Push` works with an empty message (a real commit still needs one),
    rebases a diverged branch and pushes (with no upstream it publishes

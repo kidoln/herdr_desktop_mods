@@ -9,17 +9,20 @@
 // Hunk headers and file metadata span the full width in both.
 //
 // For a file on this machine (not a binary), the header carries an Edit button: the
-// pane turns into an editor for the file on disk, with Save writing it back only
-// while it still matches what was read, then refreshing the diff. A commit's diff is
-// no exception: the editor holds the working-tree copy (the only one a save can
-// write), while the diff behind keeps showing the commit's version. Leaving with
-// unsaved changes asks once.
+// pane turns into an editor for the file on disk, opening where the diff was looking —
+// the row that was clicked (the diff's cursor) or else the first row on screen — with
+// that line in the middle of the pane and the caret on it, and scrolling back to its
+// row on the way out. The caret's line is marked with a band behind the text, followed
+// as the caret moves. Save writes it back only while it still matches what was read,
+// then refreshes the diff. A commit's diff is no exception: the editor holds the
+// working-tree copy (the only one a save can write), while the diff behind keeps
+// showing the commit's version. Leaving with unsaved changes asks once.
 //
 // It never writes to the repository, follows the panel (another click updates the
 // same tab), and follows the panel's machine for a remote space.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, Editor, EditorState, VirtualListScrollHandle } from "gpui-base";
 import { shared, exec, readTextFile, writeTextFile, theme, settings } from "herdr";
 
 // The same read flags the git panel uses: no index refresh, no lock, no fsmonitor
@@ -39,6 +42,8 @@ const countLines = (text) => (text ? text.split("\n").length - Number(text.endsW
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const language = (path) => { const ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "txt"; return LANG[ext] ?? ext; };
 const MAX_EDIT = 1048576; // readTextFile's cap: a longer file cannot round-trip a save
+const EDIT_FONT = 11;     // the editor's font size (design px)
+const EDIT_LINE = 17.5;   // one editor line's height at EDIT_FONT (design px); the caret band's height too
 const icon = (name) => svg(`mods/git-diff/${name}.svg`).flex_none();
 
 // Real red / green row tints: saturated bases at a readable alpha. The theme's ANSI
@@ -54,13 +59,21 @@ const tint = (sign) => (sign === "-" ? RED() + TINT_ALPHA() : sign === "+" ? GRE
 // view); `uni` re-expands every run in unified order, removals then additions (for
 // the one-column view a narrow pane falls back to). Context lines fill both sides /
 // appear once. Hunk headers and file metadata become full-width rows in both.
+//
+// Every code row also carries `line`: the row's place in the working-tree file,
+// which is the copy the editor opens — the new side's number for a context or
+// added line, and for a removal, which the new file no longer has, the line the
+// new file puts where it was. A jump from the diff to the editor aims there.
 function buildRows(lines) {
   const side = [], uni = [];
   let old = 0, next = 0, minus = null, plus = null;
   const flush = () => {
     if (!minus && !plus) return;
     const a = minus ?? [], b = plus ?? [];
-    for (let i = 0; i < Math.max(a.length, b.length); i++) side.push({ left: a[i] ?? null, right: b[i] ?? null });
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const left = a[i] ?? null, right = b[i] ?? null;
+      side.push({ left, right, line: (right ?? left)?.line ?? null });
+    }
     for (const cell of a) uni.push(cell);
     for (const cell of b) uni.push(cell);
     minus = plus = null;
@@ -73,13 +86,14 @@ function buildRows(lines) {
       flush(); full("meta", line); continue;
     }
     const kind = line[0];
-    if (kind === "-") { if (plus) flush(); minus = minus ?? []; minus.push({ n: old++, text: line.slice(1) || " ", sign: "-" }); continue; }
-    if (kind === "+") { plus = plus ?? []; plus.push({ n: next++, text: line.slice(1) || " ", sign: "+" }); continue; }
+    if (kind === "-") { if (plus) flush(); minus = minus ?? []; minus.push({ n: old++, text: line.slice(1) || " ", sign: "-", line: next }); continue; }
+    if (kind === "+") { plus = plus ?? []; const n = next++; plus.push({ n, text: line.slice(1) || " ", sign: "+", line: n }); continue; }
     if (kind === " ") {
       flush();
       const text = line.slice(1) || " ";
-      const cell = { n: next++, text, sign: " " };
-      side.push({ left: { n: old++, text, sign: " " }, right: cell });
+      const n = next++;
+      const cell = { n, text, sign: " ", line: n };
+      side.push({ left: { n: old++, text, sign: " ", line: n }, right: cell, line: n });
       uni.push(cell);
       continue;
     }
@@ -87,6 +101,16 @@ function buildRows(lines) {
   }
   flush();
   return { side, uni };
+}
+
+// The working-tree line a row stands for. Hunk headers and file metadata have
+// none, so a row scrolled to the top resolves to the nearest code row: the next
+// one down, else the last one up.
+function lineOf(list, index) {
+  const start = Math.max(0, Math.min(index, list.length - 1));
+  for (let i = start; i < list.length; i++) if (list[i].line) return list[i].line;
+  for (let i = start - 1; i >= 0; i--) if (list[i].line) return list[i].line;
+  return null;
 }
 
 // A byte-capped patch: `git ... | head -c CAP` so a huge diff stops early instead
@@ -148,6 +172,21 @@ export default class GitDiff extends View {
     this.saving = false;
     this.discard = false;               // leaving with unsaved changes asks once
     this.editError = null;              // read/save problem, shown above the editor
+    this.edH = 0;                       // the editor's height, in design px, once laid out
+    this.editTopPx = 0;                 // the editor's scroll from the file's top, in design px
+    this.editCaret = null;              // the editor caret's line
+    this.editLine = 1;                  // the line it opens on: the diff's cursor or top row
+    this.editText = null;               // the text its caret offsets count in
+    this.editLines = null;              // that text, split
+    this.editCount = 0;                 // how many lines it has
+    this.caretTask = null;              // follows the caret while editing
+    this.scroll = VirtualListScrollHandle.new(); // the diff's position, so it can be gone back to
+    this.viewTop = null;                // the first row on screen's line in the working-tree file
+    this.cursorLine = null;             // the diff row clicked last: a line, not a row, so it survives the one-column fold
+    // The target is watched from here, not from render(): starting a fetch there
+    // interrupts the frame it was asked for.
+    this.sync(cx);
+    cx.timer.every(300, (cx) => this.sync(cx));
   }
 
   // Re-derives the rows whenever the panel publishes a new target. Guarded by the
@@ -159,6 +198,7 @@ export default class GitDiff extends View {
     this.seq = seq;
     this.target = target ?? null;
     this.rows = []; this.uni = []; this.kind = "mixed"; this.error = null;
+    this.cursorLine = null; this.viewTop = null;
     // Another file was picked: leave the editor when nothing would be lost, and
     // keep it (and its unsaved text) when there is.
     if (this.editFile && !this.dirty && (target?.root !== this.editFile.root || target?.path !== this.editFile.path)) this.leave();
@@ -191,33 +231,118 @@ export default class GitDiff extends View {
   editable(target) { return Boolean(target?.path) && !target.on && !target.binary; }
 
   leave() {
+    this.caretTask?.cancel(); this.caretTask = null;
     this.code?.release();
     this.code = null; this.editFile = null; this.saved = null;
     this.dirty = false; this.discard = false; this.editError = null;
+    this.editCaret = null;
+    this.editText = null; this.editLines = null; this.editCount = 0;
+    this.edH = 0; this.editTopPx = 0;
   }
 
   startEdit(cx) {
     const target = this.target;
     if (!this.editable(target) || this.code) return;
     const file = { root: target.root, path: target.path };
+    // Where it opens: the row clicked in the diff, else the first one on screen —
+    // read now, before the click could change either or a render could pass.
+    const openLine = Math.round(this.cursorLine ?? this.viewTop ?? 1) || 1;
     this.editFile = file; this.editError = null; this.discard = false;
-    const token = ++this.loadToken;
     cx.spawn(async (cx) => {
       let text = null;
       try { text = await readTextFile(`${file.root}/${file.path}`); } catch {}
-      if (this.editFile !== file || this.loadToken !== token) return;
+      if (this.editFile !== file) return;
       if (text === null) { this.editError = "This file is not on disk (deleted, or unreadable)"; cx.notify(); return; }
       if (text.includes("\0")) { this.editError = "Binary file \u00b7 cannot edit"; cx.notify(); return; }
       if (text.length >= MAX_EDIT) { this.editError = "File is too large to edit here"; cx.notify(); return; }
+        this.edH = 0; this.editTopPx = 0; this.editCaret = null;
+      this.editText = text;
+      this.editLines = text.split("\n");
+      this.editCount = Math.max(1, this.editLines.length - Number(text.endsWith("\n")));
+      this.editLine = Math.max(1, Math.min(this.editCount, openLine));
       const t = theme();
-      this.code = EditorState.new({ language: language(file.path), value: text, font_family: settings().font_family, font_size: 11,
+      this.code = EditorState.new({ language: language(file.path), value: text, font_family: settings().font_family, font_size: EDIT_FONT,
         syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       this.saved = text;
       this.dirty = false;
       // Its own cx: this fires long after the click that made the editor.
-      this.code.on("change", (_e, ccx) => { this.dirty = this.code.value() !== this.saved; this.discard = false; ccx.notify(); });
+      this.code.on("change", (_e, ccx) => {
+        const value = this.code.value();
+        this.dirty = value !== this.saved;
+        this.discard = false;
+        this.editText = value;
+        ccx.notify();
+      });
       cx.notify();
     });
+  }
+
+  // The selection's caret in the text, 1-based.
+  lineAt(offset) {
+    const text = this.editText ?? "";
+    let line = 1;
+    for (let i = 0; i < offset && i < text.length; i++) if (text.charCodeAt(i) === 10) line++;
+    return line;
+  }
+
+  put(line) {
+    const code = this.code, lines = this.editLines;
+    if (!code || !lines) return;
+    const n = Math.max(1, Math.min(this.editCount, Math.round(line) || 1));
+    let offset = 0;
+    for (let i = 0; i < n - 1; i++) offset += lines[i].length + 1;
+    code.set_selected_range({ start: offset, end: offset });
+  }
+
+  // Opens on the diff's line, in the middle of the pane, and keeps the band there
+  // as the caret moves. The editor only scrolls a caret that is out of sight, and
+  // only as far as it must: a line below the view lands on the bottom edge, one
+  // above on the top. So the line whose row ends at the bottom edge of the wanted
+  // scroll goes first; the wanted line is in view by then, so the caret lands on
+  // it without moving the view again.
+  placeEdit(cx) {
+    const code = this.code;
+    if (!code || !this.editText || !(this.edH > 0)) return; // no size yet: the layout reports again
+    this.caretTask?.cancel();
+    const L = EDIT_LINE, H = this.edH, count = this.editCount;
+    const maxTop = Math.max(0, count * L - H);
+    const want = Math.max(0, Math.min(maxTop, (this.editLine - 1) * L - (H - L) / 2));
+    const bottom = Math.max(1, Math.min(count, Math.round((want + H) / L)));
+    // The scroll this lands on, kept here: the band's offset follows it.
+    let top = Math.max(0, Math.min(maxTop, bottom * L - H));
+    let caret = this.editLine;
+    this.editTopPx = top;
+    this.editCaret = caret;
+    this.put(bottom);
+    cx.timer.after(80, (cx) => { if (this.code !== code) return; this.put(this.editLine); code.focus(); cx.notify(); });
+    // The band is drawn beside the editor, not by it: the caret's line is read from
+    // its selection and its scroll is mirrored here, the same rule the editor uses.
+    this.caretTask = cx.timer.every(160, (cx) => {
+      const ed = this.code;
+      if (ed !== code || !this.editText) return;
+      let line;
+      try { line = this.lineAt(ed.selected_range().start); } catch { this.caretTask?.cancel(); this.caretTask = null; return; }
+      let t = top;
+      if ((line - 1) * L < t) t = (line - 1) * L;
+      else if (line * L > t + H) t = line * L - H;
+      t = Math.max(0, Math.min(maxTop, t));
+      if (t !== top || line !== caret) {
+        top = t; caret = line;
+        this.editTopPx = t;
+        this.editCaret = line;
+        cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
+  // The diff's own cursor: the row clicked last, remembered as a line so it holds
+  // when the pane folds to one column (the row indexes differ there).
+  pick(list, index, cx) {
+    const line = lineOf(list, index);
+    if (line == null || line === this.cursorLine) return;
+    this.cursorLine = line;
+    cx.notify();
   }
 
   save(cx) {
@@ -247,7 +372,23 @@ export default class GitDiff extends View {
     // cannot drop them.
     if (this.dirty && !this.discard) { this.discard = true; cx.notify(); return; }
     this.leave();
+    this.restore(cx);
     cx.notify();
+  }
+
+  // Back to the diff in the row it was left at: the list is a fresh element now
+  // (the editor stood in its place), so the position is asked for again. The
+  // stored value is a line, which the row is found by in either column shape.
+  restore(cx) {
+    const line = this.viewTop;
+    if (!(line > 0)) return;
+    cx.timer.after(60, (cx) => {
+      const list = this.kind !== "mixed" || (this.paneW > 0 && this.paneW < NARROW) ? this.uni : this.rows;
+      const index = list.findIndex((row) => row.line && row.line >= line);
+      if (index <= 0) return;
+      this.scroll.scroll_to_item(index, "top");
+      cx.notify();   // the request is taken up by the frame after it is made
+    });
   }
 
   // An empty label makes the button icon-only: in a very narrow pane a word
@@ -305,19 +446,29 @@ export default class GitDiff extends View {
         .when(row.full === "hunk", (e) => e.bg(t.raised))
         .text_color(t.dim).child(row.text);
     }
+    // The clicked row, under its red or green wash: a faint accent so the line
+    // the editor will land on is the one that reads as chosen.
+    const cursor = Boolean(row.line) && row.line === this.cursorLine;
     if (row.left !== undefined) {
       return h_flex().w_full().h(ROW).flex_none().items_center()
+        .when(cursor, (e) => e.bg(t.accent + "1a"))
         .child(this.cell(row.left, t))
         .child(div().w(1).h(ROW).flex_none().bg(t.border))
         .child(this.cell(row.right, t));
     }
-    return h_flex().w_full().h(ROW).flex_none().items_center().child(this.cell(row, t));
+    return h_flex().w_full().h(ROW).flex_none().items_center()
+      .when(cursor, (e) => e.bg(t.accent + "1a"))
+      .child(this.cell(row, t));
   }
 
   body(list, t) {
     return div().flex_1().min_h(0).relative().overflow_hidden()
-      .child(v_virtual_list("git-diff-rows", list.length, ROW, (i) => String(i),
-        (range) => list.slice(range.start, range.end).map((row) => this.row(row, t))).size_full())
+      .child(v_virtual_list("git-diff-rows", list.length, ROW, (i) => String(i), (range) => {
+        // What the top of the pane shows: where the editor opens, and where the
+        // diff is put back on the way out (a line, so it survives a fold).
+        this.viewTop = lineOf(list, range.start);
+        return list.slice(range.start, range.end).map((row) => this.row(row, t));
+      }).track_scroll(this.scroll).on_item_click((key, cx) => this.pick(list, Number(key), cx)).size_full())
       .child(Scrollbar.vertical("git-diff-rows").viewport_from_layout().absolute().inset_0())
       .when(!list.length, (e) => e.child(div().absolute().top(8).px(12).text_color(t.dim)
         .child(this.error || (this.loading ? "Loading\u2026" : this.target?.path ? "No text diff" : "Select a file in Git to compare it here"))));
@@ -325,13 +476,28 @@ export default class GitDiff extends View {
 
   editorBody(t) {
     if (!this.code) return v_flex().flex_1().min_h(0).p(12).text_color(t.dim).child(this.editError ?? "Loading\u2026");
+    const mark = this.editCaret != null && this.edH > 0;
+    const y = mark ? (this.editCaret - 1) * EDIT_LINE - this.editTopPx : 0;
     return v_flex().flex_1().min_h(0)
       .when(Boolean(this.editError), (e) => e.child(div().flex_none().px(10).py(4).bg(t.ansi1 + "22").text_color(t.ansi1).text_size(11).child(this.editError)))
-      .child(Editor.new(this.code).flex_1().min_h(0));
+      .child(v_flex().id("git-diff-editor").flex_1().min_h(0).relative().overflow_hidden().bg(t.background)
+        // Its height is what places the editor: the layout reports it once the
+        // pane has a size.
+        .on_size_change((size, cx) => {
+          const h = size.height / settings().zoom;
+          if (!(h > 0) || Math.abs(h - this.edH) < 0.5) return;
+          this.edH = h;
+          if (this.editCaret != null) this.editLine = this.editCaret;   // a resize keeps the line it is on
+          if (this.editText) this.placeEdit(cx);
+        })
+        // The caret's line, behind the text: the editor paints no background of
+        // its own here, so the band shows through and the text stays crisp.
+        .when(mark, (e) => e.child(div().absolute().left(0).right(0).top(y).h(EDIT_LINE).bg(t.accent + "2e")))
+        .child(Editor.new(this.code).flex_1().min_h(0).bg("#00000000")));
   }
 
   render(cx) {
-    this.sync(cx);
+
     const t = theme();
     // A new or deleted file has no other side to align against, so it stays one
     // column whatever the width. For everything else two columns need room for a
@@ -349,6 +515,7 @@ export default class GitDiff extends View {
   }
 
   async close() {
+    this.caretTask?.cancel();
     try { this.code?.release(); } catch {}
   }
 }
