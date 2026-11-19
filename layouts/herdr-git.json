@@ -48,19 +48,6 @@
               "min": 90
             }
           ]
-        },
-        {
-          "id": "sidebar-footer",
-          "type": "block",
-          "content": {
-            "mod": "workspace-chrome-rail",
-            "props": {
-              "footer": true
-            }
-          },
-          "size": {
-            "px": 69
-          }
         }
       ],
       "size": {
