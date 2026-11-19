@@ -1527,8 +1527,7 @@ export default class Git extends View {
   // the log (remembered; the strip also measures the window's pixel unit while
   // it lays out). The chevron cycles the three states -- full, folded to the
   // three newest commits, closed -- and dragging the strip while folded opens
-  // the pane and sizes it from the folded height. The count reads
-  // "<shown>/<all>" while a branch filter is on.
+  // the pane and sizes it from the folded height.
   historySection(t) {
     const commits = this.shownCommits();
     const graph = this.graph();
@@ -1561,8 +1560,6 @@ export default class Git extends View {
           .on_click((_e, cx) => { cx.stop_propagation(); this.toggleHistory(cx); })
           .child(icon(closed ? "chevron-right" : "chevron-down").size(14).text_color(t.muted)))
         .child(div().flex_1().text_size(11.5).font_semibold().text_color(t.muted).child("Commits"))
-        .child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim)
-          .child(filtered ? `${commits.length}/${this.commits.length}` : String(commits.length)))
         .child(div().id("git-reflog").w(18).h(18).flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.refresh(cx); })
