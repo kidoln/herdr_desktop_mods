@@ -7,8 +7,8 @@
 // one; never another tab's). opencode's prompts come from its own SQLite;
 // Claude Code's come from its own state files (a tail of history.jsonl, keyed by
 // the session Herdr's foreground pid names); Codex's come from its state
-// database and history.jsonl (the folder's newest thread), so none needs a
-// hook. Hovering
+// database and history.jsonl (the folder's newest thread); Pi's come from its
+// session JSONL (the folder's newest session), so none needs a hook. Hovering
 // that message crawls it right to left when it does not fit; pressing it opens
 // the session's user messages above the bar, numbered in the order they were
 // sent, and pressing one of those copies it to the clipboard.
@@ -54,6 +54,10 @@ const CODEX_MISS_MS = 5000; // ms before a rollout is retried after no history
 const CODEX_DB_TTL = 30000; // ms Codex's state database path is trusted
 const CODEX_PROMPT_LINES = 40; // rollout lines scanned for the newest prompt
 const CODEX_MENU_LINES = 1200; // rollout lines scanned when the menu opens
+const PI = "pi"; // Pi's program-table key and the `app` it reports
+const PI_PROMPT_LINES = 40; // session lines scanned for the newest prompt
+const PI_MENU_LINES = 1200; // session lines scanned when the menu opens
+const PI_MENU_MAX = 400; // messages kept in the session menu
 
 // The live folder of an agent, even when it has no pane of its own (a sub-agent).
 function agentCwd(a) {
@@ -103,11 +107,16 @@ function isCodex(a) {
   return a?.app === CODEX || a?.program?.key === CODEX;
 }
 
+function isPi(a) {
+  return a?.app === PI || a?.program?.key === PI;
+}
+
 // Which agent's prompt line the bar can show, or null for anyone else.
 function agentKind(a) {
   if (isOpencode(a)) return "opencode";
   if (isClaude(a)) return "claude";
   if (isCodex(a)) return "codex";
+  if (isPi(a)) return "pi";
   return null;
 }
 
@@ -255,6 +264,32 @@ function codexRolloutText(o) {
   return text;
 }
 
+// A person's message from a Pi session line. Pi stores the conversation as a
+// tree of `message` entries; a user message's content is a string or an array
+// of text/image blocks. System context, tool results and extension messages
+// carry other roles and are not the person's typing.
+function piUserText(o) {
+  if (!o || o.type !== "message") return "";
+  const m = o.message;
+  if (!m || m.role !== "user") return "";
+  const c = m.content;
+  let text = "";
+  let files = 0;
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c)) {
+    text = c
+      .filter((b) => b && b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("\n");
+    files = c.filter(
+      (b) => b && (b.type === "image" || b.type === "document"),
+    ).length;
+  }
+  text = text.trim();
+  if (!text && !files) return "";
+  return text || `[${files} ${files === 1 ? "file" : "files"}]`;
+}
+
 // A message's send time, to the second.
 function sentAt(ms) {
   const n = Number(ms);
@@ -354,6 +389,11 @@ export default class StatusBranch extends View {
     this.codexHomes = new Map();
     this.codexDbs = new Map();
     this.codexMiss = new Map();
+
+    // Pi's own state: its config folder and its session folder, both read once
+    // per machine (PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR).
+    this.piHomes = new Map();
+    this.piSessions = new Map();
 
     // The prompt's message menu: every user message of the session, oldest
     // first, read fresh when the line is pressed.
@@ -509,6 +549,31 @@ export default class StatusBranch extends View {
   // Codex's state folder (`~/.codex`, or wherever CODEX_HOME points).
   async codexHomeFor(machine) {
     return this.homeFor("CODEX_HOME:-$HOME/.codex", machine, this.codexHomes);
+  }
+
+  // Pi's config folder (`~/.pi/agent`, or wherever PI_CODING_AGENT_DIR points).
+  async piHomeFor(machine) {
+    return this.homeFor(
+      "PI_CODING_AGENT_DIR:-$HOME/.pi/agent",
+      machine,
+      this.piHomes,
+    );
+  }
+
+  // Where Pi writes sessions: PI_CODING_AGENT_SESSION_DIR, else the config
+  // folder's `sessions` (also what a project setting may override; that one is
+  // not visible from here).
+  async piSessionsFor(base, machine) {
+    const key = machine ?? "";
+    if (this.piSessions.has(key)) return this.piSessions.get(key);
+    const dir = await this.homeFor(
+      `PI_CODING_AGENT_SESSION_DIR:-\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions`,
+      machine,
+      new Map(),
+    );
+    const path = dir || (base ? `${base}/sessions` : "");
+    this.piSessions.set(key, path);
+    return path;
   }
 
   // Codex's session index: `state_<n>.sqlite`, whose number changes with a
@@ -719,6 +784,99 @@ export default class StatusBranch extends View {
     });
     if (rows) return { ok: true, messages: rows.slice(-CODEX_MENU_MAX) };
     return h.ok ? { ok: true, messages } : { ok: false, messages: [] };
+  }
+
+  // The folder Pi encodes for a cwd: the leading separator dropped, each
+  // slash, backslash and colon replaced by "-", then wrapped in "--".
+  piSessionDir(sessions, cwd) {
+    const enc = String(cwd ?? "")
+      .replace(/^[\\/]+/, "")
+      .replace(/[\\/:]/g, "-");
+    return enc ? `${sessions}/--${enc}--` : "";
+  }
+
+  // The session file behind this terminal: the folder's most recently written
+  // session, which is what `pi --continue` would open. Pi keeps no per-process
+  // session file and its title carries only the folder, so this is the mapping
+  // there is; two Pi TUIs in one folder share it, and a newer session wins.
+  async piSessionFile({ cwd, machine }) {
+    if (!cwd) return null;
+    const base = await this.piHomeFor(machine);
+    if (!base) return null;
+    const sessions = await this.piSessionsFor(base, machine);
+    if (!sessions) return null;
+    const dir = this.piSessionDir(sessions, cwd);
+    if (!dir) return null;
+    const r = await exec(
+      "sh",
+      ["-c", 'ls -1t "$0"/*.jsonl 2>/dev/null | head -n 1', dir],
+      machine ? { on: machine } : {},
+    ).catch(() => null);
+    const path = r?.code === 0 ? r.stdout.trim() : "";
+    return path || null;
+  }
+
+  // A Pi session's person messages, oldest first. The file is JSONL; only
+  // lines carrying a user role are grepped, so assistant text and tool output
+  // never reach the parser.
+  async readPiSession({ path, machine, want }) {
+    if (!path) return null;
+    const lines = want === "prompt" ? PI_PROMPT_LINES : PI_MENU_LINES;
+    const r = await exec(
+      "sh",
+      [
+        "-c",
+        `grep -a '"role":"user"' "$0" | tail -n ${lines} || true`,
+        path,
+      ],
+      machine ? { on: machine } : {},
+    ).catch(() => null);
+    if (!r) return null;
+    const messages = [];
+    for (const line of String(r.stdout).split("\n")) {
+      const s = line.trim();
+      if (!s.startsWith("{")) continue;
+      let o;
+      try {
+        o = JSON.parse(s);
+      } catch {
+        continue;
+      }
+      const text = piUserText(o);
+      if (!text) continue;
+      messages.push({
+        text,
+        at: Date.parse(o.timestamp ?? "") || Number(o.message?.timestamp) || 0,
+      });
+    }
+    return messages;
+  }
+
+  // The menu's header: the folder the session works in. Pi's session name is
+  // an optional entry of its own; the bar stays with the folder until that is
+  // worth another read.
+  piSummary(cwd) {
+    const folder = String(cwd ?? "").replace(/[\\/]+$/, "");
+    return folder.split(/[\\/]/).pop() || "Pi";
+  }
+
+  // The newest prompt of the Pi session behind this terminal.
+  async readPiPrompt({ cwd, machine }) {
+    const path = await this.piSessionFile({ cwd, machine });
+    if (!path) return { ok: false, text: "" };
+    const summary = this.piSummary(cwd);
+    const rows = await this.readPiSession({ path, machine, want: "prompt" });
+    if (!rows) return { ok: false, text: "", summary };
+    return { ok: true, text: rows[rows.length - 1]?.text ?? "", summary };
+  }
+
+  // Every person message of the Pi session, oldest first.
+  async readPiMessages({ cwd, machine }) {
+    const path = await this.piSessionFile({ cwd, machine });
+    if (!path) return { ok: false, messages: [] };
+    const rows = await this.readPiSession({ path, machine, want: "messages" });
+    if (!rows) return { ok: false, messages: [] };
+    return { ok: true, messages: rows.slice(-PI_MENU_MAX) };
   }
 
   // The newest user message in the opencode session behind this terminal.
@@ -1200,7 +1358,9 @@ export default class StatusBranch extends View {
               })
             : kind === "codex"
               ? await this.readCodexMessages({ cwd, machine })
-              : await this.readOpencodeMessages({ cwd, title, machine });
+              : kind === "pi"
+                ? await this.readPiMessages({ cwd, machine })
+                : await this.readOpencodeMessages({ cwd, title, machine });
       } catch {}
       if (gen !== this.promptMsgGen) return;
       this.promptMsgError = !res.ok;
@@ -1281,7 +1441,9 @@ export default class StatusBranch extends View {
             ? await this.readClaudePrompt({ address: a.address, cwd, machine })
             : kind === "codex"
               ? await this.readCodexPrompt({ cwd, machine })
-              : await this.readOpencodePrompt({ cwd, title, machine });
+              : kind === "pi"
+                ? await this.readPiPrompt({ cwd, machine })
+                : await this.readOpencodePrompt({ cwd, title, machine });
       } catch {}
       this.promptBusy = false;
       if (gen !== this.promptGen) return;

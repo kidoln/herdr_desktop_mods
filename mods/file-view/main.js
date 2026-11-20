@@ -17,11 +17,16 @@
 // Clicking the file the tab already shows closes it again (the panel's own
 // click toggles), and another file opens in the same tab. A picked file never
 // throws away unsaved edits: while the editor is modified it waits, and the
-// save releases it.
+// save releases it. The header's find field searches the whole text (unsaved
+// edits included); while it holds a query the pane draws the text itself, every
+// match a yellow run and the current one stronger, and Enter walks them. The
+// editor paints a selection only while it holds the keyboard, which the find
+// field does, so the matches are drawn rather than selected. Its Wrap chip
+// (Alt+Z) soft-wraps long lines and stays as the person left it.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { shared, readTextFile, writeTextFile, theme, settings, appHome, exec } from "herdr";
+import { v_flex, h_flex, Input, InputState, Editor, EditorState, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { shared, readTextFile, writeTextFile, theme, settings, appHome, exec, nextCommand } from "herdr";
 import * as fs from "fs/promises";
 import { join } from "path";
 import { Buffer } from "buffer";
@@ -34,6 +39,17 @@ const MAX_EDIT = 1048576; // readTextFile's cap: a longer file cannot round-trip
 const MAX_VIEW = 400000;  // what a read-only view keeps of a longer file
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 const icon = (name) => svg(`mods/file-view/${name}.svg`).flex_none();
+const SEARCH_DEBOUNCE = 120; // ms after the last keystroke before a search runs
+const SEARCH_MAX = 5000;     // matches kept: enough to navigate any real file
+const ROW = 18;              // px per row of the find view
+const CHAR_W = 7.2;          // a column at 12px in JetBrains Mono: columns per row
+
+// The index of the first entry greater than `v`, in an ascending array.
+function upperBound(a, v) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; }
+  return lo;
+}
 
 // Picture files, by extension. image() reads from the app's own folder only, so
 // the bytes are copied into COPY_DIR first and the pane keeps the copy.
@@ -99,7 +115,7 @@ async function pruneCopies() {
 }
 
 export default class FileView extends View {
-  init() {
+  init(_props, cx) {
     this.seq = null;
     this.target = null;     // the file the panel published (it waits while edits are unsaved)
     this.editFile = null;   // { root, path, on }: the file the editor holds
@@ -116,9 +132,324 @@ export default class FileView extends View {
     this.saveError = null;  // a refused save, shown above the editor
     this.loading = false;
     this.loadToken = 0;     // guards a stale read after the panel picked another file
+
+    // The editor's own view options, not the file's: soft wrap stays as the
+    // person left it (per pane), and the search is over what the editor holds
+    // now, unsaved edits included.
+    this.wrap = localStorage.getItem("wrap") === "1";
+    this.lastWrapToggle = 0; // Alt+Z can arrive as both a command and a key
+    this.handle = cx.focus_handle();
+    this.query = "";
+    this.matches = [];       // match start offsets in the editor's text
+    this.matchIndex = -1;
+    this.searchTimer = null;
+    // The find view: the file's lines cut into rows of `cols` columns, one
+    // virtual row per (line, chunk), with the runs of each match beside them.
+    this.searchScroll = VirtualListScrollHandle.new();
+    this.searchText = "";
+    this.searchLines = [];   // { start, end } per file line
+    this.rowFirst = [];      // the row each line starts on
+    this.searchMarks = new Map(); // line -> [{ from, to, cur }]
+    this.lineCount = 0;
+    this.cols = 80;
+    this.rows = 0;
+    this.currentRow = -1;
+    this.revealToken = 0;
+    this.search = InputState.new({ placeholder: "Search in file\u2026" });
+    this.search.on("change", (_e, ccx) => this.onSearch(ccx));
+    this.search.on("submit", (e, ccx) => this.stepMatch(e?.shift ? -1 : 1, ccx));
+    cx.spawn(async (cx) => {
+      for (;;) {
+        let cmd;
+        try { cmd = await nextCommand(); } catch { return; }
+        if (cmd === "toggle_wrap") this.toggleWrap(cx);
+        else if (cmd === "clear_search" && this.query) this.clearSearch(cx);
+      }
+    });
   }
 
   sameFile(a, b) { return Boolean(a && b) && a.root === b.root && a.path === b.path && (a.on ?? null) === (b.on ?? null); }
+
+  // ---- search and wrap ----
+
+  // A new file starts with a clean find bar: the old file's matches are not
+  // this file's.
+  resetSearch() {
+    if (this.searchTimer) { try { this.searchTimer.cancel(); } catch {} this.searchTimer = null; }
+    this.query = "";
+    this.matches = [];
+    this.matchIndex = -1;
+    this.clearRows();
+    try { this.search?.set_value(""); } catch {}
+  }
+
+  clearRows() {
+    this.searchText = "";
+    this.searchLines = [];
+    this.rowFirst = [];
+    this.searchMarks = new Map();
+    this.lineCount = 0;
+    this.rows = 0;
+    this.currentRow = -1;
+  }
+
+  // Typing waits for a short pause, then searches the whole editor text. The
+  // first match at or after the caret is shown first, wrapping.
+  onSearch(cx) {
+    this.query = this.search.value();
+    if (this.searchTimer) { try { this.searchTimer.cancel(); } catch {} this.searchTimer = null; }
+    if (!this.query) {
+      this.matches = []; this.matchIndex = -1;
+      this.clearRows();
+      cx.notify();
+      return;
+    }
+    this.searchTimer = cx.timer.after(SEARCH_DEBOUNCE, (ccx) => {
+      this.searchTimer = null;
+      this.findMatches();
+      if (!this.matches.length) { this.matchIndex = -1; ccx.notify(); return; }
+      let caret = 0;
+      try { caret = this.code?.selected_range()?.start ?? 0; } catch {}
+      const next = this.matches.findIndex((off) => off >= caret);
+      this.matchIndex = next >= 0 ? next : 0;
+      this.selectMatch();
+      this.buildRows();
+      this.revealMatch(ccx);
+      ccx.notify();
+    });
+  }
+
+  // Every occurrence, case-insensitively, in a text the editor may have edited
+  // but not saved. Non-overlapping, like a find bar counts.
+  findMatches() {
+    const text = this.code ? this.code.value() : "";
+    const q = this.query;
+    this.matches = [];
+    if (!text || !q) { this.clearRows(); return; }
+    const hay = text.toLowerCase(), needle = q.toLowerCase();
+    let at = 0;
+    while (this.matches.length < SEARCH_MAX) {
+      const i = hay.indexOf(needle, at);
+      if (i < 0) break;
+      this.matches.push(i);
+      at = i + Math.max(1, needle.length);
+    }
+    this.buildRows();
+  }
+
+  // The editor's caret goes to the current match: invisible while the find
+  // field holds the keyboard, it is where the editor opens once the search is
+  // cleared.
+  selectMatch() {
+    if (!this.code || this.matchIndex < 0 || !this.matches.length) return;
+    const start = this.matches[this.matchIndex];
+    try { this.code.set_selected_range({ start, end: start + this.query.length }); } catch {}
+  }
+
+  stepMatch(dir, cx) {
+    if (!this.code || !this.query) return;
+    if (!this.matches.length) this.findMatches();
+    if (!this.matches.length) { this.matchIndex = -1; cx.notify(); return; }
+    this.matchIndex = ((this.matchIndex + dir) % this.matches.length + this.matches.length) % this.matches.length;
+    this.selectMatch();
+    this.buildRows();
+    this.revealMatch(cx);
+    cx.notify();
+  }
+
+  // Clearing from the header's button hands the keyboard back to the editor,
+  // which scrolls to the match the search had reached.
+  clearSearch(cx) {
+    const had = Boolean(this.query);
+    this.resetSearch();
+    if (had) cx.timer.after(30, (ccx) => { try { this.code?.focus(); } catch {} ccx.notify(); });
+    cx.notify();
+  }
+
+  // ---- the find view ----
+  // The file's lines, cut into rows of the pane's columns (a tab counts four),
+  // so a long line wraps at a fixed place and every match can be seen. Only the
+  // rows on screen are built: the list asks for a range each frame.
+
+  gutterWidth() {
+    return String(Math.max(1, this.lineCount || 1)).length * CHAR_W + 12;
+  }
+
+  // Columns one row holds: what the pane leaves right of the line numbers.
+  searchCols() {
+    const z = Number(settings()?.zoom) || 1;
+    const avail = Math.max(120, Math.round((this.size?.width ?? 640) / z) - this.gutterWidth() - 18);
+    return Math.max(20, Math.floor(avail / CHAR_W));
+  }
+
+  // Columns from the start of a line to `off`, tabs counted as four.
+  cellsBefore(raw, off) {
+    let n = 0;
+    for (let i = 0; i < off && i < raw.length; i++) n += raw.charCodeAt(i) === 9 ? 4 : 1;
+    return n;
+  }
+
+  cellCount(raw) {
+    let n = 0;
+    for (let i = 0; i < raw.length; i++) n += raw.charCodeAt(i) === 9 ? 4 : 1;
+    return n;
+  }
+
+  // The rows of the current query: every line's first row, the row each match
+  // starts on (so navigation can go there), and the marks by line.
+  buildRows() {
+    this.clearRows();
+    const text = this.code ? this.code.value() : "";
+    if (!text || !this.query) return;
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+    this.searchText = text;
+    this.lineCount = starts.length;
+    this.cols = this.searchCols();
+    const marks = new Map();
+    for (let k = 0; k < this.matches.length; k++) {
+      const s = this.matches[k];
+      const line = upperBound(starts, s) - 1;
+      const run = { from: s - starts[line], to: s - starts[line] + this.query.length, cur: k === this.matchIndex };
+      const list = marks.get(line);
+      if (list) list.push(run); else marks.set(line, [run]);
+    }
+    this.searchMarks = marks;
+    let start = 0, row = 0, line = 0;
+    for (;;) {
+      let end = text.indexOf("\n", start);
+      const last = end < 0;
+      if (last) end = text.length;
+      this.searchLines.push({ start, end });
+      this.rowFirst.push(row);
+      for (const run of marks.get(line) ?? []) {
+        if (!run.cur) continue;
+        this.currentRow = row + Math.floor(this.cellsBefore(text.slice(start, end), run.from) / this.cols);
+      }
+      row += Math.max(1, Math.ceil(this.cellCount(text.slice(start, end)) / this.cols));
+      line += 1;
+      if (last) break;
+      start = end + 1;
+    }
+    this.rows = row;
+  }
+
+  // Puts the current match's row in the middle of the pane. The list is
+  // mounted a frame after the first search, so the jump is repeated once.
+  revealMatch(cx) {
+    if (!this.query || this.currentRow < 0) return;
+    const token = ++this.revealToken;
+    const row = this.currentRow;
+    const jump = () => { try { this.searchScroll.scroll_to_item(row, "center"); } catch {} };
+    jump();
+    try {
+      cx.timer.after(40, (ccx) => {
+        if (this.revealToken !== token) return;
+        jump();
+        ccx.notify();
+      });
+    } catch {}
+  }
+
+  // One row: its line number (only on the line's first row) and its text in
+  // runs -- plain, a match, or the current match.
+  searchRow(index, t) {
+    const li = upperBound(this.rowFirst, index) - 1;
+    const line = this.searchLines[li];
+    let raw = this.searchText.slice(line.start, line.end);
+    if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+    const first = index - this.rowFirst[li];
+    const startCol = first * this.cols, endCol = startCol + this.cols;
+    const runs = this.searchMarks.get(li);
+    const segs = [];
+    let buf = "", kind = 0, col = 0, mi = 0;
+    const flush = () => { if (buf) { segs.push([buf, kind]); buf = ""; } };
+    for (let i = 0; i < raw.length && col < endCol; ) {
+      const code = raw.charCodeAt(i);
+      const w = code === 9 ? 4 : 1;
+      let k = 0;
+      if (runs) {
+        while (mi < runs.length && runs[mi].to <= i) mi++;
+        const r = runs[mi];
+        if (r && i >= r.from && i < r.to) k = r.cur ? 2 : 1;
+      }
+      if (col >= startCol) {
+        if (k !== kind) { flush(); kind = k; }
+        buf += code === 9 ? "    " : raw[i];
+      }
+      col += w; i += 1;
+    }
+    flush();
+    return h_flex().h(ROW).flex_none().w_full().items_center().overflow_hidden()
+      .child(div().w(this.gutterWidth()).flex_none().pr(10).text_size(10.5).text_color(t.dim).text_right()
+        .child(first ? "" : String(li + 1)))
+      .children(segs.map(([s, k]) => div().flex_none().text_size(12).font_family(MONO())
+        .when(k === 1, e => e.bg(t.ansi3 + "5c"))
+        .when(k === 2, e => e.bg(t.ansi3).text_color(t.background))
+        .child(s)));
+  }
+
+  searchBody(t) {
+    const rows = this.rows;
+    return v_flex().flex_1().min_h(0).relative()
+      .child(v_virtual_list("file-view-search", rows, ROW, (i) => String(i), (range) => {
+        const out = [];
+        for (let i = range.start; i < range.end && i < rows; i++) out.push(this.searchRow(i, t));
+        return out;
+      }).flex_1().min_h(0).track_scroll(this.searchScroll))
+      .child(Scrollbar.vertical("file-view-search").absolute().inset_0());
+  }
+
+  // Soft wrap: rebuilding the editor is what applies the new mode (the state
+  // has no setter). Value, selection and the modified flag survive; undo
+  // history does not.
+  toggleWrap(cx) {
+    // The same press can reach both the key section (a command) and the
+    // element's key handler; one toggle per press either way.
+    const now = Date.now();
+    if (now - this.lastWrapToggle < 80) return;
+    this.lastWrapToggle = now;
+    this.wrap = !this.wrap;
+    try { localStorage.setItem("wrap", this.wrap ? "1" : "0"); } catch {}
+    if (this.code) {
+      const value = this.code.value();
+      let range = null;
+      try { range = this.code.selected_range(); } catch {}
+      const path = this.editFile?.path ?? this.target?.path ?? "txt";
+      this.code.release();
+      this.code = this.createEditor(path, value, this.readOnly);
+      if (!this.readOnly) this.watchChanges();
+      try { if (range) this.code.set_selected_range(range); } catch {}
+      this.findMatches();
+      this.matchIndex = this.matches.length ? Math.max(0, Math.min(this.matchIndex, this.matches.length - 1)) : -1;
+      if (this.query) { this.buildRows(); this.revealMatch(cx); }
+    }
+    try { cx.notify(); } catch { cx.timer.after(0, (ccx) => ccx.notify()); }
+  }
+
+  createEditor(path, value, readOnly) {
+    const t = theme();
+    return EditorState.new({ language: language(path), readonly: readOnly, value,
+      font_family: settings().font_family, font_size: 12, soft_wrap: Boolean(this.wrap),
+      syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+  }
+
+  // The editor's change hook: keeps the modified flag honest and, while a
+  // search is up, re-runs it over the edited text.
+  watchChanges() {
+    if (!this.code) return;
+    this.code.on("change", (_e, ccx) => {
+      if (!this.code) return;
+      this.dirty = this.code.value() !== this.saved;
+      this.saveError = null;
+      if (this.query) {
+        this.findMatches();
+        this.matchIndex = this.matches.length ? Math.max(0, Math.min(this.matchIndex, this.matches.length - 1)) : -1;
+        this.buildRows();
+      }
+      ccx.notify();
+    });
+  }
 
   // The room the picture has, in the same px the mod draws with: the pane
   // minus the header, the padding and a little air. on_size_change reports the
@@ -185,26 +516,20 @@ export default class FileView extends View {
       this.code = null; this.editFile = null; this.saved = null;
       this.image = null; this.shownImage = null; this.oneToOne = false;
       this.dirty = false; this.readOnly = false;
+      this.resetSearch();
       if (text === null) error = error ?? "This file is no longer available";
       else if (text.includes("\0")) error = "Binary file \u00b7 no text editor";
       else {
-        const t = theme();
         // Another machine's file cannot be written from here, and a file past
         // readTextFile's cap may be truncated: both open as views, not editors.
         this.readOnly = Boolean(target.on) || text.length >= MAX_EDIT;
-        this.code = EditorState.new({ language: language(target.path), readonly: this.readOnly,
-          value: this.readOnly && text.length > MAX_VIEW ? text.slice(0, MAX_VIEW) + "\n\u2026 (file truncated)" : text,
-          font_family: settings().font_family, font_size: 12,
-          syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+        this.code = this.createEditor(target.path,
+          this.readOnly && text.length > MAX_VIEW ? text.slice(0, MAX_VIEW) + "\n\u2026 (file truncated)" : text,
+          this.readOnly);
         this.editFile = { root: target.root, path: target.path, on: target.on ?? null };
         if (!this.readOnly) {
           this.saved = text;
-          this.code.on("change", (_e, ccx) => {
-            if (!this.code) return;
-            this.dirty = this.code.value() !== this.saved;
-            this.saveError = null;
-            ccx.notify();
-          });
+          this.watchChanges();
         }
       }
       this.error = error; this.loading = false;
@@ -250,6 +575,7 @@ export default class FileView extends View {
       this.code?.release();
       this.code = null; this.editFile = null; this.saved = null;
       this.dirty = false; this.readOnly = true; this.oneToOne = false;
+      this.resetSearch();
       this.image = bytes ? { name, ...(imageSize(bytes) ?? { w: null, h: null }), bytes: bytes.length } : null;
       this.shownImage = bytes ? { root: target.root, path: target.path, on: target.on ?? null } : null;
       this.error = bytes ? null : error ?? "This file is no longer available";
@@ -264,6 +590,7 @@ export default class FileView extends View {
     this.code = null; this.editFile = null; this.saved = null;
     this.image = null; this.shownImage = null; this.oneToOne = false;
     this.dirty = false; this.readOnly = false; this.saving = false; this.saveError = null;
+    this.resetSearch();
   }
 
   // A refused save (the file changed outside Herdr) leaves a dead end unless the
@@ -311,6 +638,45 @@ export default class FileView extends View {
       .child(div().child(this.saving ? "Saving\u2026" : "Save"));
   }
 
+  // Soft wrap, the editor's own switch. Alt+Z runs the same command through the
+  // mod's key section; the chip keeps it visible and clickable.
+  wrapButton(t) {
+    const on = this.wrap;
+    return h_flex().id("file-view-wrap").flex_none().h(20).px(7).gap(5).items_center().rounded(6).text_size(10.5)
+      .tooltip(on ? "Soft wrap is on (Alt+Z)" : "Soft wrap long lines (Alt+Z)")
+      .when(on, e => e.bg(t.selected).text_color(t.foreground).cursor_pointer().hover(s => s.opacity(0.85)))
+      .when(!on, e => e.bg(t.raised).border_1().border_color(t.border).text_color(t.dim).cursor_pointer().hover(s => s.bg(t.hover)))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.toggleWrap(cx); })
+      .child(icon("wrap").size(12))
+      .child(div().child("Wrap"));
+  }
+
+  // The search field in the header, immediately left of Wrap: the input, the
+  // match count, previous/next, and a way to clear it.
+  searchField(t) {
+    const n = this.matches.length;
+    const pos = n ? this.matchIndex + 1 : 0;
+    const count = this.query ? (n ? `${pos}/${n}` : "0") : "";
+    const nav = (name, dir) => h_flex().id(`file-view-search-${name}`).flex_none().w(18).h(18).items_center().justify_center()
+      .rounded(5).cursor_pointer().hover(s => s.bg(t.hover)).tooltip(dir < 0 ? "Previous match (Shift+Enter)" : "Next match (Enter)")
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.stepMatch(dir, cx); })
+      .child(icon(name).size(11).text_color(t.muted));
+    return h_flex().id("file-view-search").flex_none().gap(4).items_center()
+      .child(h_flex().flex_none().h(22).px(6).gap(5).items_center().rounded(5)
+        .bg(t.background).border_1().border_color(t.input)
+        .child(icon("search").size(11).text_color(t.dim))
+        .child(Input.new(this.search).w(170).h(20).text_color(t.foreground).text_size(11)))
+      .when(Boolean(count), e => e.child(div().flex_none().px(1).text_size(10.5).text_color(n ? t.muted : t.dim).child(count)))
+      .when(n > 0, e => e.child(nav("chevron-up", -1)).child(nav("chevron-down", 1)))
+      .when(Boolean(this.query), e => e.child(h_flex().id("file-view-search-clear").flex_none().w(18).h(18).items_center().justify_center()
+        .rounded(5).cursor_pointer().hover(s => s.bg(t.hover)).tooltip("Clear search")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.clearSearch(cx); })
+        .child(icon("x").size(11).text_color(t.dim))));
+  }
+
   // Fit / 1:1, the picture's own toggle: fitting scales it down to the pane,
   // 1:1 shows it at its pixel size and scrolls the rest.
   fitButton(t) {
@@ -332,6 +698,8 @@ export default class FileView extends View {
       .when(Boolean(i) && this.shrunk(), e => e.child(this.fitButton(t)))
       .when(Boolean(chip), e => e.child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10)
         .text_color(this.dirty ? t.ansi1 : t.dim).child(chip)))
+      .when(Boolean(this.code), e => e.child(this.searchField(t)))
+      .when(Boolean(this.code), e => e.child(this.wrapButton(t)))
       .when(Boolean(this.editFile) && !this.readOnly, e => e.child(this.saveButton(t)));
   }
 
@@ -373,7 +741,8 @@ export default class FileView extends View {
           .text_size(10.5).text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover))
           .on_click((_e, cx) => { cx.stop_propagation(); this.reload(cx); })
           .child(div().child("Reload")))))
-      .child(Editor.new(this.code).flex_1().min_h(0));
+      .when(this.query && this.rows > 0, e => e.child(this.searchBody(t)))
+      .when(!(this.query && this.rows > 0), e => e.child(Editor.new(this.code).flex_1().min_h(0)));
   }
 
   render(cx) {
@@ -381,7 +750,29 @@ export default class FileView extends View {
     const t = theme();
     return v_flex().id("file-view").size_full().min_h(0).overflow_hidden()
       .bg(t.background).text_color(t.foreground).text_size(11).font_family(MONO())
-      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        // Escape closes a search from anywhere in the pane.
+        if (e.key === "escape" && this.query) {
+          cx.stop_propagation();
+          this.clearSearch(cx);
+          return;
+        }
+        // The editor has no wrap key of its own; catch Alt+Z on the way up.
+        if (e.modifiers.alt && !e.modifiers.platform && !e.modifiers.control && e.key?.toLowerCase() === "z") {
+          cx.stop_propagation();
+          this.toggleWrap(cx);
+        }
+      })
+      .on_size_change((size, cx) => {
+        this.size = size;
+        // A wider or narrower pane holds other columns per row.
+        if (this.query && this.code) {
+          const cols = this.searchCols();
+          if (cols !== this.cols) { this.buildRows(); this.revealMatch(cx); }
+        }
+        cx.notify();
+      })
       .child(this.header(t))
       .child(this.body(t));
   }
