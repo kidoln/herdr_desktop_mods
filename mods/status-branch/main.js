@@ -41,7 +41,11 @@ const MARQUEE_DELAY = 350; // ms the pointer must rest on the line before it cra
 const MARQUEE_EDGE = 0.25; // the bar's bottom quarter: the way out of the window
 const MARQUEE_DROP = 0.18; // a downward move this share of the bar reads as heading out
 const MESSAGE_MENU_W = 460; // px: wide enough to read, narrow enough not to span the screen
+// The menu's cap, and the height it opens at while the read runs: a scroll
+// area needs a real height (see promptMenu), and the loading body is only the
+// header and one line, so the menu does not open as a tall empty box.
 const MESSAGE_MENU_MAX_H = 420;
+const MESSAGE_MENU_LOADING_H = 74;
 const CLAUDE_PID_TTL = 5000; // ms a terminal's Claude pid is trusted
 const CLAUDE_HISTORY_BYTES = 262144; // history.jsonl tail read on every tick
 const CLAUDE_HISTORY_MENU = 2097152; // history.jsonl read when the menu opens
@@ -402,6 +406,7 @@ export default class StatusBranch extends View {
     this.promptMsgError = false;
     this.promptMsgGen = 0;
     this.promptMenuClosedAt = 0; // a press that closed it must not reopen it
+    this.promptMenuHeight = null; // the menu body's measured height, window px
 
     // Hover marquee: two copies on one track, slid left by exactly one copy
     // per pass; at the end the second copy sits where the first began, so the
@@ -1375,6 +1380,9 @@ export default class StatusBranch extends View {
     if (open) {
       this.promptMessages = null; // show Loading… while the read runs
       this.promptMsgError = false;
+      // A fresh read: measure again, and open at the small loading height
+      // rather than the previous session's height.
+      this.promptMenuHeight = null;
       this.loadPromptMessages(cx);
     } else {
       this.promptMsgGen++; // a late read is no longer wanted
@@ -1660,17 +1668,30 @@ export default class StatusBranch extends View {
   // The menu above the bar: every user message of this session, oldest first
   // and numbered from one. It scrolls once it would cover too much of the
   // window; the width is fixed so long prompts wrap instead of stretching.
+  //
+  // The scroll area needs a real height, not `max_h`: an auto/max-heighted
+  // scroll area lays its content out at full height and clips it, drawing no
+  // bar and giving the wheel nothing to move (one long message then hides
+  // every message after it). So the body inside is measured and the menu
+  // takes min(body + its border, the cap): short lists stay short, long ones
+  // scroll.
   promptMenu(t) {
     const rows = this.promptMessages;
     const count = rows?.length ?? 0;
     const summary = this.promptSummary;
     const empty = (text) => div().p(8).text_color(t.dim).child(text);
+    const loading = rows === null && !this.promptMsgError;
+    const height = Math.min(
+      (this.promptMenuHeight ??
+        (loading ? MESSAGE_MENU_LOADING_H : MESSAGE_MENU_MAX_H)) + 2,
+      MESSAGE_MENU_MAX_H,
+    );
     return v_flex()
       .id("status-prompt-menu")
       .w(MESSAGE_MENU_W)
-      .max_h(MESSAGE_MENU_MAX_H)
+      .h(height)
+      .flex_none()
       .overflow_y_scrollbar()
-      .p(4)
       .rounded(8)
       .bg(t.popover)
       .border_1()
@@ -1678,64 +1699,76 @@ export default class StatusBranch extends View {
       .text_size(12)
       .text_color(t.foreground)
       .child(
-        h_flex()
-          .flex_none()
-          .px(8)
-          .pt(4)
-          .pb(6)
-          .gap(8)
-          .items_center()
-          .border_b(1)
-          .border_color(t.border)
+        v_flex()
+          .id("status-prompt-menu-body")
+          .w_full()
+          .p(4)
+          .on_size_change((size, cx) => {
+            if (Math.abs(size.height - (this.promptMenuHeight ?? -1)) > 0.5) {
+              this.promptMenuHeight = size.height;
+              this.paint(cx);
+            }
+          })
           .child(
-            div()
-              .flex_1()
-              .min_w(0)
-              .truncate()
-              .text_color(t.muted)
-              .when(Boolean(summary), (el) => el.tooltip(summary))
-              .child(summary || "Session messages"),
+            h_flex()
+              .flex_none()
+              .px(8)
+              .pt(4)
+              .pb(6)
+              .gap(8)
+              .items_center()
+              .border_b(1)
+              .border_color(t.border)
+              .child(
+                div()
+                  .flex_1()
+                  .min_w(0)
+                  .truncate()
+                  .text_color(t.muted)
+                  .when(Boolean(summary), (el) => el.tooltip(summary))
+                  .child(summary || "Session messages"),
+              )
+              .when(rows !== null && !this.promptMsgError, (el) =>
+                el.child(
+                  div().text_size(10.5).text_color(t.dim).child(String(count)),
+                ),
+              ),
           )
-          .when(rows !== null && !this.promptMsgError, (el) =>
-            el.child(
-              div().text_size(10.5).text_color(t.dim).child(String(count)),
-            ),
-          ),
-      )
-      .when(rows === null && !this.promptMsgError, (el) =>
-        el.child(empty("Loading…")),
-      )
-      .when(this.promptMsgError, (el) =>
-        el.child(empty("Cannot read this session")),
-      )
-      .when(rows !== null && !this.promptMsgError && !rows.length, (el) =>
-        el.child(empty("No messages")),
-      )
-      .children(
-        (rows ?? []).map((msg, i) => {
-          const at = sentAt(msg.at);
-          return h_flex()
-            .id(`status-prompt-message-${i}`)
-            .flex_none()
-            .px(8)
-            .py(6)
-            .gap(8)
-            .items_start()
-            .cursor_pointer()
-            .tooltip("Click to copy")
-            .hover((s) => s.bg(t.hover))
-            .when(i < count - 1, (el) => el.border_b(1).border_color(t.border))
-            .on_click((_e, cx) => this.copyMessage(msg.text, cx))
-            .child(
-              div()
+          .when(loading, (el) => el.child(empty("Loading…")))
+          .when(this.promptMsgError, (el) =>
+            el.child(empty("Cannot read this session")),
+          )
+          .when(rows !== null && !this.promptMsgError && !rows.length, (el) =>
+            el.child(empty("No messages")),
+          )
+          .children(
+            (rows ?? []).map((msg, i) => {
+              const at = sentAt(msg.at);
+              return h_flex()
+                .id(`status-prompt-message-${i}`)
                 .flex_none()
-                .w(22)
-                .text_size(11)
-                .text_color(t.dim)
-                .child(`${i + 1}.`),
-            )
-            .child(this.messageBody(t, msg, at));
-        }),
+                .px(8)
+                .py(6)
+                .gap(8)
+                .items_start()
+                .cursor_pointer()
+                .tooltip("Click to copy")
+                .hover((s) => s.bg(t.hover))
+                .when(i < count - 1, (el) =>
+                  el.border_b(1).border_color(t.border),
+                )
+                .on_click((_e, cx) => this.copyMessage(msg.text, cx))
+                .child(
+                  div()
+                    .flex_none()
+                    .w(22)
+                    .text_size(11)
+                    .text_color(t.dim)
+                    .child(`${i + 1}.`),
+                )
+                .child(this.messageBody(t, msg, at));
+            }),
+          ),
       );
   }
 
